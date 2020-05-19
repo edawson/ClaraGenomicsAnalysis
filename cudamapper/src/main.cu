@@ -436,7 +436,7 @@ void writer_thread_function(std::mutex& overlaps_writer_mtx,
     // Perform overlap-end rescue
     if (perform_overlap_end_rescue)
     {
-        Overlapper::rescue_overlap_ends(*filtered_overlaps, query_parser, target_parser, 50, 0.5);
+        Overlapper::rescue_overlap_ends(*filtered_overlaps, query_parser, target_parser, 50, 0.9);
     }
 
     {
