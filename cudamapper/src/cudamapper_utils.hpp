@@ -45,34 +45,28 @@ void print_paf(const std::vector<Overlap>& overlaps,
                std::mutex& write_output_mutex,
                int32_t number_of_devices);
 
-/// \brief Given a string s, produce its kmers (length <kmer-length>) and return them as a vector of strings.
-/// \param s A string sequence to kmerize.
-/// \param kmer_size A kmer length to use for producing kmers.
-/// \param stride The number of bases to skip when selecting kmers (most often, this should be equal to 1).
-/// \return A vector of strings containing the kmers (of length kmer_length) of s. If s is shorter than the kmer size, return s.
-std::vector<cga_string_view_t> split_into_kmers(const cga_string_view_t& s, std::int32_t kmer_size, std::int32_t stride);
-
-/// \brief Given two sorted vectors of comparable types, return a size_t count of the number of shared elements.
-/// Duplicates are counted the number of times they appear (i.e., two vectors of ten identical elements would
-/// return a shared count of 10).
-/// \param a A sorted vector of elements. These must be comparable (i.e., they must implement the == and < operators) and sorted in ascending order.
-/// \param b A sorted vector of elements. These must be comparable with those in a and sorted in ascending order.
-/// \return The number of elements the two sets have in common, including repeated elements, as a std::size_t.
-template <typename T>
-std::size_t count_shared_elements(const std::vector<T>& a, const std::vector<T>& b);
-
-/// \brief Given two sequences 'a' and 'b', calculate an estimate of their similarity
-/// Calculates the approximate nucleotide identity (or "similarity")
-/// estimated from the Jaccard index of the kmers of strings a and b.
-/// Note: This function assumes that a and b are on the same strand; you may need to
-/// reverse-complement one of the strings if testing similarity on strings from different
-/// strands.
-/// \param a A C++ string
-/// \param b A C++ string
-/// \param kmer_size The kmer length to use for estimating similarity.
-/// \param stride The number of bases to stride between kmers.
-/// \return The estimated Jaccard index as a float.
-float sequence_jaccard_similarity(const cga_string_view_t& a, const cga_string_view_t& b, std::int32_t kmer_size, std::int32_t stride);
+///
+/// \brief Calculate the jaccard sequence similarity of the sequences a[a_start:a_end] and b[b_start:b_end]
+/// using the Jaccard similarity coefficient of the kmer spaces of the sequences.
+/// \param a A C string DNA sequence.
+/// \param a_start The start position on a.
+/// \param a_end The end position on a.
+/// \param b A C string DNA sequence.
+/// \param b_start The start position on b.
+/// \param b_end The end position on b.
+/// \param kmer_size The kmer size to use for comparison
+/// \param array_size The size of the internal array to use for counting. Larger arrays may be more accurate at the expense of memory usage.
+/// \param reversed Whether the overlap is reversed. If true, use the reverse-complement of the opposite ends of b in calculating similarity.
+/// \return A float of the approximate sequence similarity
+float fast_sequence_similarity(char*& a,
+                               position_in_read_t a_start,
+                               position_in_read_t a_end,
+                               char*& b,
+                               position_in_read_t b_start,
+                               position_in_read_t b_end,
+                               std::int32_t kmer_size,
+                               std::int32_t array_size,
+                               bool reversed);
 
 } // namespace cudamapper
 

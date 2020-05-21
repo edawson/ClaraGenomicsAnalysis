@@ -70,6 +70,16 @@ void reverse_complement(std::string& s, const std::size_t len)
     }
 }
 
+void reverse_complement(char*& s, const std::size_t len)
+{
+    for (std::size_t i = 0; i < len / 2; ++i)
+    {
+        char tmp       = s[i];
+        s[i]           = static_cast<char>(complement_array[static_cast<int>(s[len - 1 - i] - 65)]);
+        s[len - 1 - i] = static_cast<char>(complement_array[static_cast<int>(tmp) - 65]);
+    }
+}
+
 claraparabricks::genomeworks::cga_string_view_t string_view_slice(const claraparabricks::genomeworks::cga_string_view_t& s, const std::size_t start, const std::size_t end)
 {
     return s.substr(start, end - start);
@@ -174,11 +184,12 @@ void Overlapper::post_process_overlaps(std::vector<Overlap>& overlaps)
 }
 
 void details::overlapper::extend_overlap_by_sequence_similarity(Overlap& overlap,
-                                                                cga_string_view_t& query_sequence,
-                                                                cga_string_view_t& target_sequence,
+                                                                std::string& query_sequence,
+                                                                std::string& target_sequence,
                                                                 const std::int32_t extension,
                                                                 const float required_similarity)
 {
+    std::int32_t kmer_size = 15;
 
     const position_in_read_t query_head_rescue_size  = std::min(overlap.query_start_position_in_read_, static_cast<position_in_read_t>(extension));
     const position_in_read_t target_head_rescue_size = std::min(overlap.target_start_position_in_read_, static_cast<position_in_read_t>(extension));
@@ -186,12 +197,27 @@ void details::overlapper::extend_overlap_by_sequence_similarity(Overlap& overlap
     const position_in_read_t head_rescue_size = std::min(query_head_rescue_size, target_head_rescue_size);
 
     const position_in_read_t query_head_start  = overlap.query_start_position_in_read_ - head_rescue_size;
+    const position_in_read_t query_head_end    = query_head_start + head_rescue_size;
     const position_in_read_t target_head_start = overlap.target_start_position_in_read_ - head_rescue_size;
+    const position_in_read_t target_head_end   = target_head_start + head_rescue_size;
 
-    cga_string_view_t query_head_sequence  = string_view_slice(query_sequence, query_head_start, overlap.query_start_position_in_read_);
-    cga_string_view_t target_head_sequence = string_view_slice(target_sequence, target_head_start, overlap.target_start_position_in_read_);
+    if (head_rescue_size < kmer_size)
+    {
+        kmer_size = 1;
+    }
 
-    float head_similarity = sequence_jaccard_similarity(query_head_sequence, target_head_sequence, 15, 1);
+    char* query_seq_raw  = const_cast<char*>(query_sequence.c_str());
+    char* target_seq_raw = const_cast<char*>(target_sequence.c_str());
+
+    float head_similarity = fast_sequence_similarity(query_seq_raw,
+                                                     query_head_start,
+                                                     query_head_end,
+                                                     target_seq_raw,
+                                                     target_head_start,
+                                                     target_head_end,
+                                                     kmer_size,
+                                                     1000,
+                                                     false);
     if (head_similarity >= required_similarity)
     {
         overlap.query_start_position_in_read_  = overlap.query_start_position_in_read_ - head_rescue_size;
@@ -203,10 +229,26 @@ void details::overlapper::extend_overlap_by_sequence_similarity(Overlap& overlap
     // Calculate the shortest sequence length at the tail and use this as the window for comparison.
     const position_in_read_t tail_rescue_size = std::min(query_tail_rescue_size, target_tail_rescue_size);
 
-    cga_string_view_t query_tail_sequence  = string_view_slice(query_sequence, overlap.query_end_position_in_read_, overlap.query_end_position_in_read_ + tail_rescue_size);
-    cga_string_view_t target_tail_sequence = string_view_slice(target_sequence, overlap.target_end_position_in_read_, overlap.target_end_position_in_read_ + tail_rescue_size);
+    const position_in_read_t query_tail_start  = overlap.query_end_position_in_read_;
+    const position_in_read_t query_tail_end    = overlap.query_end_position_in_read_ + tail_rescue_size;
+    const position_in_read_t target_tail_start = overlap.target_end_position_in_read_;
+    const position_in_read_t target_tail_end   = overlap.target_end_position_in_read_ + tail_rescue_size;
 
-    const float tail_similarity = sequence_jaccard_similarity(query_tail_sequence, target_tail_sequence, 15, 1);
+    kmer_size = 15;
+    if (tail_rescue_size < kmer_size)
+    {
+        kmer_size = 1;
+    }
+
+    const float tail_similarity = fast_sequence_similarity(query_seq_raw,
+                                                           query_tail_start,
+                                                           query_tail_end,
+                                                           target_seq_raw,
+                                                           target_tail_start,
+                                                           target_tail_end,
+                                                           kmer_size,
+                                                           1000,
+                                                           false);
     if (tail_similarity >= required_similarity)
     {
         overlap.query_end_position_in_read_  = overlap.query_end_position_in_read_ + tail_rescue_size;
@@ -241,8 +283,7 @@ void Overlapper::rescue_overlap_ends(std::vector<Overlap>& overlaps,
 
         // Overlap rescue at "head" (i.e., "left-side") of overlap
         // Get the sequences of the query and target
-        const std::string query_sequence = query_parser.get_sequence_by_id(overlap.query_read_id_).seq;
-        cga_string_view_t query_view(query_sequence);
+        std::string query_sequence = query_parser.get_sequence_by_id(overlap.query_read_id_).seq;
         // target_sequence is non-const as it may be modified when reversing an overlap.
         std::string target_sequence = target_parser.get_sequence_by_id(overlap.target_read_id_).seq;
 
@@ -253,7 +294,6 @@ void Overlapper::rescue_overlap_ends(std::vector<Overlap>& overlaps,
             reverse_complement(target_sequence, target_sequence.length());
             reversed = true;
         }
-        cga_string_view_t target_view(target_sequence);
 
         const std::size_t max_rescue_rounds  = 3;
         std::size_t rescue_rounds            = 0;
@@ -264,7 +304,7 @@ void Overlapper::rescue_overlap_ends(std::vector<Overlap>& overlaps,
 
         while (rescue_rounds < max_rescue_rounds)
         {
-            details::overlapper::extend_overlap_by_sequence_similarity(overlap, query_view, target_view, 100, 0.9);
+            details::overlapper::extend_overlap_by_sequence_similarity(overlap, query_sequence, target_sequence, 100, 0.9);
             ++rescue_rounds;
             if (overlap.query_end_position_in_read_ == prev_query_start &&
                 overlap.query_end_position_in_read_ == prev_query_end &&

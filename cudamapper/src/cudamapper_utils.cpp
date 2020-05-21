@@ -12,11 +12,14 @@
 #include <cassert>
 #include <thread>
 #include <vector>
+#include <cstring>
 
 #include "cudamapper_utils.hpp"
 
 #include <claragenomics/io/fasta_parser.hpp>
 #include <claragenomics/utils/signed_integer_utils.hpp>
+
+#include <iostream>
 
 namespace claraparabricks
 {
@@ -152,62 +155,99 @@ void print_paf(const std::vector<Overlap>& overlaps,
     }
 }
 
-std::vector<cga_string_view_t> split_into_kmers(const cga_string_view_t& s, const std::int32_t kmer_size, const std::int32_t stride)
+std::uint32_t MurmurHash3_x86_32(void* key, std::int32_t length, std::uint32_t seed, std::uint32_t* hash_value)
 {
-    const std::size_t kmer_count = s.length() - kmer_size + 1;
-    std::vector<cga_string_view_t> kmers;
+    const uint8_t* data             = reinterpret_cast<const uint8_t*>(key);
+    const std::uint32_t block_count = length / 4; // 4 8-bit "blocks" in a 32-bit int
 
-    if (s.length() < kmer_size)
+    std::uint32_t hash_start  = seed;
+    const uint32_t constant_1 = 0xcc9e2d51;
+    const uint32_t constant_2 = 0x1b873593;
+    const uint32_t* blocks    = reinterpret_cast<const uint32_t*>(data + block_count * 4);
+
+    for (std::int32_t i = -block_count; i; i++)
     {
-        kmers.push_back(s);
-        return kmers;
+
+        uint32_t k = blocks[i];
+
+        k *= constant_1;
+        k = ((k << 15) | (k >> (32 - 15)));
+        k *= constant_2;
+        hash_start ^= k;
+        hash_start = ((hash_start << 15) | (hash_start >> (32 - 13)));
+        hash_start = hash_start * 5 + 0xe6546b64;
     }
 
-    for (std::size_t i = 0; i < kmer_count; i += stride)
+    const uint8_t* tail = reinterpret_cast<const uint8_t*>(data + block_count * 4);
+
+    std::uint32_t k = 0;
+    switch (length & 3)
     {
-        kmers.push_back(s.substr(i, i + kmer_size));
-    }
-    return kmers;
+    case 3: k ^= tail[2] << 16;
+    case 2: k ^= tail[1] << 8;
+    case 1:
+        k ^= tail[0];
+        k *= constant_1;
+        k = ((k << 15) | (k >> (32 - 15)));
+        k *= constant_2;
+        hash_start ^= k;
+    };
+
+    hash_start ^= length;
+
+    hash_start ^= hash_start >> 16;
+    hash_start *= 0x85ebca6b;
+    hash_start ^= hash_start >> 13;
+    hash_start *= 0xc2b2ae35;
+    hash_start ^= hash_start >> 16;
+
+    *hash_value = hash_start;
 }
 
-template <typename T>
-std::size_t count_shared_elements(const std::vector<T>& a, const std::vector<T>& b)
+float fast_sequence_similarity(char*& a,
+                               position_in_read_t a_start,
+                               position_in_read_t a_end,
+                               char*& b,
+                               position_in_read_t b_start,
+                               position_in_read_t b_end,
+                               std::int32_t kmer_size,
+                               std::int32_t array_size,
+                               bool reversed)
 {
-    std::size_t a_index      = 0;
-    std::size_t b_index      = 0;
-    std::size_t shared_count = 0;
+    std::uint32_t intersection_size = 0;
 
-    while (a_index < a.size() && b_index < b.size())
+    const position_in_read_t a_length = a_end - a_start;
+    const std::uint32_t num_a_kmers   = a_length - kmer_size + 1;
+    const position_in_read_t b_length = b_end - b_start;
+    const std::uint32_t num_b_kmers   = b_length - kmer_size + 1;
+
+    std::uint32_t* count_array = new std::uint32_t[array_size];
+    memset(count_array, (uint32_t)0, array_size * sizeof(count_array[0]));
+
+    std::uint32_t* kmer_hash = new std::uint32_t[1];
+
+    for (std::size_t i = 0; i < num_a_kmers; ++i)
     {
-        if (a[a_index] == b[b_index])
+        MurmurHash3_x86_32(a + i, kmer_size, 42, kmer_hash);
+        count_array[(*kmer_hash) % array_size] = 1;
+    }
+
+    for (std::size_t i = 0; i < num_b_kmers; ++i)
+    {
+        MurmurHash3_x86_32(b + i, kmer_size, 42, kmer_hash);
+        if (count_array[(*kmer_hash) % array_size] == 1)
         {
-            ++shared_count;
-            ++a_index;
-            ++b_index;
-        }
-        else if (a[a_index] < b[b_index])
-        {
-            ++a_index;
-        }
-        else
-        {
-            ++b_index;
+            ++intersection_size;
         }
     }
-    return shared_count;
-}
 
-float sequence_jaccard_similarity(const cga_string_view_t& a, const cga_string_view_t& b, const std::int32_t kmer_size, const std::int32_t stride)
-{
-    std::vector<cga_string_view_t> a_kmers = split_into_kmers(a, kmer_size, stride);
-    std::vector<cga_string_view_t> b_kmers = split_into_kmers(b, kmer_size, stride);
-    std::sort(std::begin(a_kmers), std::end(a_kmers));
-    std::sort(std::begin(b_kmers), std::end(b_kmers));
+    delete[] kmer_hash;
 
-    const std::size_t shared_kmers = count_shared_elements(a_kmers, b_kmers);
-    // Calculate the set union size of a and b
-    std::size_t union_size = a_kmers.size() + b_kmers.size() - shared_kmers;
-    return static_cast<float>(shared_kmers) / static_cast<float>(union_size);
+    const std::uint32_t union_size = num_a_kmers + num_b_kmers - intersection_size;
+    delete[] count_array;
+
+    float similarity = static_cast<float>(intersection_size) / static_cast<float>(union_size);
+    return similarity;
 }
 
 } // namespace cudamapper
