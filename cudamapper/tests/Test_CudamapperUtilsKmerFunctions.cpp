@@ -22,13 +22,28 @@ namespace genomeworks
 namespace cudamapper
 {
 
-TEST(MMH3, hashes_chars)
+TEST(MurmurHash, murmurhash_values_are_same_or_different_as_expect)
 {
     std::string s("ACTGGCTTGC");
-    char* c             = const_cast<char*>(s.c_str());
-    std::uint32_t* hval = new uint32_t[1];
-    MurmurHash3_x86_32(c, 4, 42, hval);
-    std::cerr << *hval << std::endl;
+    std::string t("ACTGGCTTGC");
+    char* c               = const_cast<char*>(s.c_str());
+    char* d               = const_cast<char*>(t.c_str());
+    std::uint32_t* hval_c = new uint32_t;
+    std::uint32_t* hval_d = new uint32_t;
+    MurmurHash3_x86_32(c, 4, 42, hval_c);
+    MurmurHash3_x86_32(d, 4, 42, hval_d);
+    ASSERT_EQ(*hval_c, *hval_d);
+
+    MurmurHash3_x86_32(c + 4, 5, 42, hval_c);
+    MurmurHash3_x86_32(d + 4, 5, 42, hval_d);
+    ASSERT_EQ(*hval_c, *hval_d);
+
+    MurmurHash3_x86_32(c + 1, 9, 42, hval_c);
+    MurmurHash3_x86_32(d + 3, 4, 42, hval_d);
+    ASSERT_NE(*hval_c, *hval_d);
+
+    delete hval_c;
+    delete hval_d;
 }
 
 TEST(SimilarityTest, similarity_of_identical_seqs_is_1)
@@ -37,9 +52,12 @@ TEST(SimilarityTest, similarity_of_identical_seqs_is_1)
     std::string b("AAACCTATGAGGG");
     std::string long_b("AAACCTATGAGGGAAACCTATGAGGG");
 
-    char* raw_a = const_cast<char*>(a.c_str());
-    // float sim   = fast_sequence_similarity();
-    // ASSERT_EQ(sim, 1.0);
+    char* raw_a                = const_cast<char*>(a.c_str());
+    char* raw_b                = const_cast<char*>(b.c_str());
+    std::uint32_t arr_size     = 1000;
+    std::uint32_t* count_array = new std::uint32_t[arr_size];
+    float sim                  = fast_sequence_similarity(raw_a, 0, 13, raw_b, 0, 13, 5, arr_size, count_array, false);
+    ASSERT_EQ(sim, 1.0);
 }
 // TEST(SimilarityTest, similarity_of_disjoint_seqs_is_0)
 // {

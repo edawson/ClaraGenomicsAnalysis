@@ -44,7 +44,9 @@ void extend_overlap_by_sequence_similarity(Overlap& overlap,
                                            std::string& query_sequence,
                                            std::string& target_sequence,
                                            std::int32_t extension,
-                                           float required_similarity);
+                                           float required_similarity,
+                                           std::uint32_t arr_size,
+                                           std::uint32_t*& count_array);
 
 } // namespace overlapper
 } // namespace details

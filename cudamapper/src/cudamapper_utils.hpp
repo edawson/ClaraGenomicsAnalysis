@@ -66,6 +66,7 @@ float fast_sequence_similarity(char*& a,
                                position_in_read_t b_end,
                                std::int32_t kmer_size,
                                std::int32_t array_size,
+                               uint32_t*& count_array,
                                bool reversed);
 
 } // namespace cudamapper

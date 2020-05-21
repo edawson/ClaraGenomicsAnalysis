@@ -80,6 +80,11 @@ void reverse_complement(char*& s, const std::size_t len)
     }
 }
 
+void zero_array(std::uint32_t*& arr, std::uint32_t len)
+{
+    memset(arr, 0, len * sizeof(arr[0]));
+}
+
 claraparabricks::genomeworks::cga_string_view_t string_view_slice(const claraparabricks::genomeworks::cga_string_view_t& s, const std::size_t start, const std::size_t end)
 {
     return s.substr(start, end - start);
@@ -187,7 +192,9 @@ void details::overlapper::extend_overlap_by_sequence_similarity(Overlap& overlap
                                                                 std::string& query_sequence,
                                                                 std::string& target_sequence,
                                                                 const std::int32_t extension,
-                                                                const float required_similarity)
+                                                                const float required_similarity,
+                                                                std::uint32_t arr_size,
+                                                                std::uint32_t*& count_array)
 {
     std::int32_t kmer_size = 15;
 
@@ -216,7 +223,8 @@ void details::overlapper::extend_overlap_by_sequence_similarity(Overlap& overlap
                                                      target_head_start,
                                                      target_head_end,
                                                      kmer_size,
-                                                     1000,
+                                                     arr_size,
+                                                     count_array,
                                                      false);
     if (head_similarity >= required_similarity)
     {
@@ -247,7 +255,8 @@ void details::overlapper::extend_overlap_by_sequence_similarity(Overlap& overlap
                                                            target_tail_start,
                                                            target_tail_end,
                                                            kmer_size,
-                                                           1000,
+                                                           arr_size,
+                                                           count_array,
                                                            false);
     if (tail_similarity >= required_similarity)
     {
@@ -271,6 +280,9 @@ void Overlapper::rescue_overlap_ends(std::vector<Overlap>& overlaps,
         overlap.target_end_position_in_read_   = target_sequence_length - start_tmp;
     };
 
+    std::uint32_t arr_size     = 1000;
+    std::uint32_t* count_array = new std::uint32_t[arr_size];
+
     // Loop over all overlaps
     // For each overlap, retrieve the read sequence and
     // check the similarity of the overlapping head and tail sections (matched for length)
@@ -291,11 +303,11 @@ void Overlapper::rescue_overlap_ends(std::vector<Overlap>& overlaps,
         {
 
             reverse_overlap(overlap, static_cast<uint32_t>(target_sequence.length()));
-            reverse_complement(target_sequence, target_sequence.length());
+            //reverse_complement(target_sequence, target_sequence.length());
             reversed = true;
         }
 
-        const std::size_t max_rescue_rounds  = 3;
+        const std::size_t max_rescue_rounds  = 6;
         std::size_t rescue_rounds            = 0;
         position_in_read_t prev_query_start  = overlap.query_start_position_in_read_;
         position_in_read_t prev_query_end    = overlap.query_end_position_in_read_;
@@ -304,7 +316,7 @@ void Overlapper::rescue_overlap_ends(std::vector<Overlap>& overlaps,
 
         while (rescue_rounds < max_rescue_rounds)
         {
-            details::overlapper::extend_overlap_by_sequence_similarity(overlap, query_sequence, target_sequence, 100, 0.9);
+            details::overlapper::extend_overlap_by_sequence_similarity(overlap, query_sequence, target_sequence, 50, 0.8, arr_size, count_array);
             ++rescue_rounds;
             if (overlap.query_end_position_in_read_ == prev_query_start &&
                 overlap.query_end_position_in_read_ == prev_query_end &&
@@ -324,6 +336,8 @@ void Overlapper::rescue_overlap_ends(std::vector<Overlap>& overlaps,
             reverse_overlap(overlap, static_cast<uint32_t>(target_sequence.length()));
         }
     }
+
+    delete[] count_array;
 }
 
 } // namespace cudamapper

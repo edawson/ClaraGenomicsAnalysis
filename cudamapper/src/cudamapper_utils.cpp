@@ -212,6 +212,7 @@ float fast_sequence_similarity(char*& a,
                                position_in_read_t b_end,
                                std::int32_t kmer_size,
                                std::int32_t array_size,
+                               std::uint32_t*& count_array,
                                bool reversed)
 {
     std::uint32_t intersection_size = 0;
@@ -221,30 +222,26 @@ float fast_sequence_similarity(char*& a,
     const position_in_read_t b_length = b_end - b_start;
     const std::uint32_t num_b_kmers   = b_length - kmer_size + 1;
 
-    std::uint32_t* count_array = new std::uint32_t[array_size];
     memset(count_array, (uint32_t)0, array_size * sizeof(count_array[0]));
 
-    std::uint32_t* kmer_hash = new std::uint32_t[1];
+    std::uint32_t kmer_hash[1];
 
     for (std::size_t i = 0; i < num_a_kmers; ++i)
     {
         MurmurHash3_x86_32(a + i, kmer_size, 42, kmer_hash);
-        count_array[(*kmer_hash) % array_size] = 1;
+        count_array[(*kmer_hash) % static_cast<std::uint32_t>(array_size)] += 1;
     }
 
     for (std::size_t i = 0; i < num_b_kmers; ++i)
     {
         MurmurHash3_x86_32(b + i, kmer_size, 42, kmer_hash);
-        if (count_array[(*kmer_hash) % array_size] == 1)
+        if (count_array[(*kmer_hash) % static_cast<std::uint32_t>(array_size)] >= 1)
         {
             ++intersection_size;
         }
     }
 
-    delete[] kmer_hash;
-
     const std::uint32_t union_size = num_a_kmers + num_b_kmers - intersection_size;
-    delete[] count_array;
 
     float similarity = static_cast<float>(intersection_size) / static_cast<float>(union_size);
     return similarity;
