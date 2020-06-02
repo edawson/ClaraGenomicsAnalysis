@@ -272,7 +272,7 @@ void Overlapper::rescue_overlap_ends(std::vector<Overlap>& overlaps,
                                      const float required_similarity)
 {
 
-    auto reverse_overlap = [](cudamapper::Overlap& overlap, std::uint32_t target_sequence_length) {
+    auto reverse_overlap = [](cudamapper::Overlap& overlap, const std::uint32_t target_sequence_length) {
         overlap.relative_strand      = overlap.relative_strand == RelativeStrand::Forward ? RelativeStrand::Reverse : RelativeStrand::Forward;
         position_in_read_t start_tmp = overlap.target_start_position_in_read_;
         // Oddly, the target_length_ field appears to be zero up till this point, so use the sequence's length instead.
@@ -303,11 +303,11 @@ void Overlapper::rescue_overlap_ends(std::vector<Overlap>& overlaps,
         {
 
             reverse_overlap(overlap, static_cast<uint32_t>(target_sequence.length()));
-            //reverse_complement(target_sequence, target_sequence.length());
+            reverse_complement(target_sequence, target_sequence.length());
             reversed = true;
         }
 
-        const std::size_t max_rescue_rounds  = 6;
+        const std::size_t max_rescue_rounds  = 5;
         std::size_t rescue_rounds            = 0;
         position_in_read_t prev_query_start  = overlap.query_start_position_in_read_;
         position_in_read_t prev_query_end    = overlap.query_end_position_in_read_;
@@ -316,7 +316,7 @@ void Overlapper::rescue_overlap_ends(std::vector<Overlap>& overlaps,
 
         while (rescue_rounds < max_rescue_rounds)
         {
-            details::overlapper::extend_overlap_by_sequence_similarity(overlap, query_sequence, target_sequence, 50, 0.8, arr_size, count_array);
+            details::overlapper::extend_overlap_by_sequence_similarity(overlap, query_sequence, target_sequence, 50, 0.9, arr_size, count_array);
             ++rescue_rounds;
             if (overlap.query_end_position_in_read_ == prev_query_start &&
                 overlap.query_end_position_in_read_ == prev_query_end &&
