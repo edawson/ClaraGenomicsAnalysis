@@ -90,6 +90,27 @@ bool overlaps_mergable(const claraparabricks::genomeworks::cudamapper::Overlap o
     return short_gap_relative_to_length;
 }
 
+void swap_overlap_sequences(claraparabricks::genomeworks::cudamapper::Overlap& overlap)
+{
+    claraparabricks::genomeworks::read_id_t q_id             = overlap.query_read_id_;
+    claraparabricks::genomeworks::position_in_read_t q_start = overlap.query_start_position_in_read_;
+    claraparabricks::genomeworks::position_in_read_t q_end   = overlap.query_end_position_in_read_;
+    overlap.query_read_id_                                   = overlap.target_read_id_;
+    overlap.query_start_position_in_read_                    = overlap.target_start_position_in_read_;
+    overlap.query_end_position_in_read_                      = overlap.target_end_position_in_read_;
+    overlap.target_read_id_                                  = q_id;
+    overlap.target_start_position_in_read_                   = q_start;
+    overlap.target_end_position_in_read_                     = q_end;
+}
+
+void order_overlap_sequences(claraparabricks::genomeworks::cudamapper::Overlap& overlap)
+{
+    if (overlap.query_read_id_ > overlap.target_read_id_)
+    {
+        swap_overlap_sequences(overlap);
+    }
+}
+
 // Reverse complement lookup table
 static char complement_array[26] = {
     84, 66, 71, 68, 69,
@@ -142,6 +163,8 @@ void Overlapper::post_process_overlaps(std::vector<Overlap>& overlaps, const boo
 
     for (int i = 1; i < num_overlaps; i++)
     {
+        order_overlap_sequences(overlaps[i - 1]);
+        order_overlap_sequences(overlaps[i]);
         prev_overlap                  = overlaps[i - 1];
         const Overlap current_overlap = overlaps[i];
         //Check if previous overlap can be merged into the current one
