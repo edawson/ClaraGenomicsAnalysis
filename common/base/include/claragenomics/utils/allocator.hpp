@@ -14,6 +14,7 @@
 #include <type_traits>
 
 #include <cuda_runtime_api.h>
+#include <iostream>
 #include <claragenomics/utils/device_preallocated_allocator.cuh>
 
 #include <claragenomics/logging/logging.hpp>
@@ -245,6 +246,8 @@ public:
         cudaError_t err = memory_resource_->DeviceAllocate(&ptr, n * sizeof(T), stream);
         if (err == cudaErrorMemoryAllocation)
         {
+            std::cerr << "Error [device_memory_allocation_exception]: " << n << " elements of size " << sizeof(T) << " requested, for a total size of " << n * sizeof(T) << " bytes.";
+
             throw device_memory_allocation_exception();
         }
         CGA_CU_CHECK_ERR(err);
