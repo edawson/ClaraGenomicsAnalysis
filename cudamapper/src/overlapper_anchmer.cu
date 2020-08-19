@@ -454,6 +454,20 @@ __global__ void chain_overlaps_in_window(Overlap* overlaps,
     }
 }
 
+__global__ void flip_adjacent_sign(Overlap* overlaps, const int32_t n_overlaps)
+{
+    const std::size_t d_tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (d_tid > 0 && d_tid < n_overlaps - 1 && overlaps[d_tid].num_residues_ == 1 && overlaps[d_tid - 1].num_residues_ > 1 && overlaps[d_tid + 1].num_residues_ > 1)
+    {
+        RelativeStrand left_strand  = overlaps[d_tid - 1].relative_strand;
+        RelativeStrand right_strand = overlaps[d_tid + 1].relative_strand;
+        if (left_strand == right_strand)
+        {
+            overlaps[d_tid].relative_strand = right_strand;
+        }
+    }
+}
+
 // void chain_overlaps(Overlap* overlaps,
 //                     bool* overlap_mask,
 //                     Overlap* chains,
@@ -573,6 +587,8 @@ void OverlapperAnchmer::get_overlaps(std::vector<Overlap>& fused_overlaps,
     // Generate overlaps within each anchmer, filling the overlaps buffer
     anchmers_to_overlaps<<<(n_anchmers / block_size) + 1, block_size, 0, _cuda_stream>>>(d_anchmers.data(), d_overlap_ends.data(), n_anchmers,
                                                                                          d_anchors.data(), n_anchors, d_initial_overlaps.data(), n_initial_overlaps);
+
+    flip_adjacent_sign<<<(n_initial_overlaps / block_size) + 1, block_size, 0, _cuda_stream>>>(d_initial_overlaps.data(), n_initial_overlaps);
 
     /** Initial overlaps have now been generated **/
     device_buffer<Overlap> d_init_chains(n_initial_overlaps, _allocator, _cuda_stream);
@@ -756,52 +772,6 @@ void OverlapperAnchmer::get_overlaps(std::vector<Overlap>& fused_overlaps,
     fused_overlaps.resize(n_filtered_overlaps);
     cudautils::device_copy_n(d_final_overlaps.data(), n_filtered_overlaps, fused_overlaps.data(), _cuda_stream);
 
-    // d_temp_storage     = nullptr;
-    // temp_storage_bytes = 0;
-    // cub::DeviceScan::ExclusiveSum(d_temp_storage, temp_storage_bytes,
-    //                               d_chain_lengths.data(), d_chain_starts.data(),
-    //                               n_chains, _cuda_stream);
-
-    // // allocate temporary storage
-    // d_temp_buf.clear_and_resize(temp_storage_bytes);
-    // d_temp_storage = d_temp_buf.data();
-
-    // cub::DeviceScan::ExclusiveSum(d_temp_storage, temp_storage_bytes,
-    //                               d_chain_lengths.data(), d_chain_starts.data(),
-    //                               n_chains, _cuda_stream);
-
-    // device_buffer<Overlap> d_fused_chains(n_chains, _allocator, _cuda_stream);
-    // device_buffer<std::size_t> d_chain_ends(n_overlap_runs, _allocator, _cuda_stream);
-    // convert_offsets_to_ends<<<(n_overlap_runs / block_size) + 1, block_size, 0, _cuda_stream>>>(d_chain_starts.data(), d_chain_lengths.data(), d_chain_ends.data(), n_overlap_runs);
-    // merge_overlap_runs<<<(n_chains) + 1, block_size, 0, _cuda_stream>>>(d_fused_overlaps.data(), d_chain_starts.data(), d_chain_ends.data(), n_chains, d_fused_chains.data());
-
-    // d_initial_overlap_mask.clear_and_resize(n_chains);
-    // mask_overlaps<<<(n_initial_overlaps / block_size) + 1, block_size, 0, _cuda_stream>>>(d_fused_chains.data(), n_chains, d_initial_overlap_mask.data(), min_overlap_len, min_residues, min_bases_per_residue, all_to_all, true);
-
-    // device_buffer<Overlap> d_final_overlaps(n_chains, _allocator, _cuda_stream);
-    // device_buffer<size_t> d_num_final_overlaps(1, _allocator, _cuda_stream);
-
-    // d_temp_storage     = nullptr;
-    // temp_storage_bytes = 0;
-    // cub::DeviceSelect::Flagged(d_temp_storage, temp_storage_bytes, d_fused_chains.data(),
-    //                            d_initial_overlap_mask.data(),
-    //                            d_final_overlaps.data(),
-    //                            d_num_final_overlaps.data(),
-    //                            n_chains,
-    //                            _cuda_stream);
-    // d_temp_buf.clear_and_resize(temp_storage_bytes);
-    // d_temp_storage = d_temp_buf.data();
-    // cub::DeviceSelect::Flagged(d_temp_storage, temp_storage_bytes, d_fused_chains.data(),
-    //                            d_initial_overlap_mask.data(),
-    //                            d_final_overlaps.data(),
-    //                            d_num_final_overlaps.data(),
-    //                            n_chains,
-    //                            _cuda_stream);
-    // std::size_t n_final_overlaps = cudautils::get_value_from_device(d_num_final_overlaps.data(), _cuda_stream);
-    // std::cerr << "Produced " << n_final_overlaps << " final overlaps; " << n_overlap_runs - n_final_overlaps << " overlaps removed by filtering." << std::endl;
-
-    // This is not completely necessary, but if removed one has to make sure that the next step
-    // uses the same stream or that sync is done in caller
     GW_CU_CHECK_ERR(cudaStreamSynchronize(_cuda_stream));
 }
 
