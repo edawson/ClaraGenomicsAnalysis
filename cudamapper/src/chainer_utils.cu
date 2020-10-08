@@ -157,6 +157,20 @@ void encode_anchor_query_locations(const Anchor* anchors,
                                                                                            query_ends.data(),
                                                                                            n_queries);
 
+// #define DEBUG_QUERY_LOCATIONS
+#ifdef DEBUG_QUERY_LOCATIONS
+    std::vector<int32_t> q_starts;
+    std::vector<int32_t> q_ends;
+    q_starts.resize(n_queries);
+    q_ends.resize(n_queries);
+    cudautils::device_copy_n(query_starts.data(), n_queries, q_starts.data(), _cuda_stream);
+    cudautils::device_copy_n(query_ends.data(), n_queries, q_ends.data(), _cuda_stream);
+    for (size_t i = 0; i < q_starts.size(); ++i)
+    {
+        std::cout << i << " " << q_starts[i] << " " << q_ends[i] << std::endl;
+    }
+#endif
+
     if (tile_size > 0)
     {
         calculate_tiles_per_read<<<(n_queries / block_size) + 1, 32, 0, _cuda_stream>>>(query_lengths.data(), n_queries, tile_size, tiles_per_query.data());

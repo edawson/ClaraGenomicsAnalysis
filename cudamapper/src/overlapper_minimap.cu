@@ -375,10 +375,8 @@ __global__ void chain_anchors_in_read(const Anchor* anchors,
     if (batch_block_id < num_queries)
     {
 
-        printf("batch-block: %d\n", batch_block_id);
         int32_t tile_start = query_starts[batch_block_id];
-        int32_t tile_end   = query_ends[batch_block_id];
-        printf("%d %d\n", tile_start, tile_end);
+        int32_t tile_end   = query_ends[batch_block_id] + 65;
 
         int32_t global_write_index = tile_start;
         int32_t global_read_index  = tile_start + thread_id_in_block;
@@ -418,7 +416,7 @@ __global__ void chain_anchors_in_read(const Anchor* anchors,
                     block_anchor_cache[thread_id_in_block]      = anchors[global_read_index + i];
                     block_score_cache[thread_id_in_block]       = 0;
                     block_predecessor_cache[thread_id_in_block] = -1;
-                    block_max_select_mask[thread_id_in_block]   = false;
+                    //block_max_select_mask[thread_id_in_block]   = false;
                     //block_score_cache[thread_id_in_block]       = scores[global_read_index + i];
                     //block_predecessor_cache[thread_id_in_block] = predecessors[global_read_index + i];
                     //block_max_select_mask[thread_id_in_block] = anchor_select_mask[global_read_index + i];
@@ -428,10 +426,9 @@ __global__ void chain_anchors_in_read(const Anchor* anchors,
                 // Calculate score
                 int32_t marginal_score = log_linear_anchor_weight(possible_successor_anchor, block_anchor_cache[thread_id_in_block], word_size, max_distance, max_bandwidth);
                 // printf("%d %d | %d %d : %d %d : %d | %d %d %d %d | %d %d %d %d\n",
-                //        thread_id_in_block, (i % PREDECESSOR_SEARCH_ITERATIONS), counter,
-                //        i,
-                //        current_score,
-                //        marginal_score,
+                //        thread_id_in_block, (i % PREDECESSOR_SEARCH_ITERATIONS),
+                //        counter, i,
+                //        current_score, marginal_score,
                 //        block_score_cache[thread_id_in_block],
                 //        block_anchor_cache[thread_id_in_block].query_read_id_,
                 //        block_anchor_cache[thread_id_in_block].query_position_in_read_,
@@ -465,9 +462,9 @@ __global__ void chain_anchors_in_read(const Anchor* anchors,
                     // It has therefore completed n = PREDECESSOR_SEARCH_ITERATIONS iterations.
                     // It's final score is known.
                     // Write its score and predecessor to the global_write_index + counter.
-                    scores[global_write_index + counter]             = static_cast<double>(current_score);
-                    predecessors[global_write_index + counter]       = current_pred;
-                    anchor_select_mask[global_write_index + counter] = current_mask;
+                    scores[global_write_index + counter]       = static_cast<double>(current_score);
+                    predecessors[global_write_index + counter] = current_pred;
+                    //anchor_select_mask[global_write_index + counter] = current_mask;
                 }
                 __syncthreads();
             }
@@ -534,7 +531,7 @@ __global__ void chain_anchors_in_block(const Anchor* anchors,
             block_anchor_cache[thread_id_in_block]      = anchors[global_read_index];
             block_score_cache[thread_id_in_block]       = static_cast<int32_t>(scores[global_read_index]);
             block_predecessor_cache[thread_id_in_block] = predecessors[global_read_index];
-            block_max_select_mask[thread_id_in_block]   = false;
+            block_max_select_mask[thread_id_in_block]   = true;
 
             for (int32_t i = PREDECESSOR_SEARCH_ITERATIONS, counter = 0; counter < batch_size; ++counter, ++i)
             {
@@ -661,7 +658,7 @@ __global__ void produce_anchor_chains(const Anchor* anchors,
     if (d_tid < n_anchors)
     {
         // printf("Anchor ID: %d, %c, %d, %d\n", static_cast<int>(d_tid), (max_select_mask[d_tid] ? 'M' : '.'), static_cast<int>(scores[d_tid]), predecessors[d_tid]);
-        if (max_select_mask[d_tid] && scores[d_tid] >= min_score)
+        if (scores[d_tid] >= min_score)
         {
             int32_t global_overlap_index = d_tid;
             int32_t index                = global_overlap_index;
@@ -676,8 +673,8 @@ __global__ void produce_anchor_chains(const Anchor* anchors,
                 if (pred != -1)
                 {
                     add_anchor_to_overlap(anchors[pred], final_overlap);
-                    // printf("| %d %d %d %d | -> | %d %d %d %d |\n", anchors[index].query_read_id_, anchors[index].query_position_in_read_, anchors[index].target_read_id_, anchors[index].target_position_in_read_,
-                    //        anchors[pred].query_read_id_, anchors[pred].query_position_in_read_, anchors[pred].target_read_id_, anchors[pred].target_position_in_read_);
+                    printf("| %d %d %d %d | -> | %d %d %d %d |\n", anchors[index].query_read_id_, anchors[index].query_position_in_read_, anchors[index].target_read_id_, anchors[index].target_position_in_read_,
+                           anchors[pred].query_read_id_, anchors[pred].query_position_in_read_, anchors[pred].target_read_id_, anchors[pred].target_position_in_read_);
                     max_select_mask[pred] = false;
                 }
                 index = predecessors[index];
@@ -844,11 +841,7 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
                                                 _cuda_stream,
                                                 32);
 
-    query_id_starts.clear_and_resize(0);
-    query_id_lengths.clear_and_resize(0);
-    query_id_ends.clear_and_resize(0);
-
-    int32_t num_batches = (n_query_tiles / BLOCK_COUNT);
+    int32_t num_batches = (n_queries / BLOCK_COUNT);
 
     // We use batches to ensure that for each anchor, the
     // scores and predecessors up to that anchor have been generated
@@ -901,6 +894,11 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
                                                                                          d_anchor_predecessors.data(),
                                                                                          n_anchors,
                                                                                          20);
+
+    d_overlaps_select_mask.clear_and_resize(n_anchors);
+    init_overlap_mask<<<(n_anchors / block_size) + 1, block_size, 0, _cuda_stream>>>(d_overlaps_select_mask.data(),
+                                                                                     n_anchors,
+                                                                                     true);
 
     mask_overlaps<<<(n_anchors / block_size) + 1, block_size, 0, _cuda_stream>>>(d_overlaps_source.data(),
                                                                                  n_anchors,
