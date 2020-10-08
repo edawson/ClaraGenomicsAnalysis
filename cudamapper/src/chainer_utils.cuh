@@ -89,37 +89,11 @@ struct AnchorToQueryTargetPairOp
 
 struct ChainResult
 {
-    Anchor start;
-    Anchor end;
+    int32_t start_anchor_index;
+    int32_t end_anchor_index;
     int32_t tile_id;
     int32_t total_score;
     int32_t num_anchors;
-};
-
-struct TileResults
-{
-    ChainResult results[MAX_CHAINS_PER_TILE];
-    int num_results = 0;
-    bool add_result(const ChainResult& r)
-    {
-        if (num_results < MAX_CHAINS_PER_TILE)
-        {
-            results[num_results] = r;
-            ++num_results;
-            return true;
-        }
-        else
-        {
-            for (int i = 0; i < num_results; ++i)
-            {
-                if (r.total_score > results[i].total_score)
-                {
-                    results[i] = r;
-                }
-            }
-        }
-        return false;
-    }
 };
 
 __device__ bool

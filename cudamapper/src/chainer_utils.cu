@@ -59,7 +59,7 @@ __global__ void convert_offsets_to_ends(std::int32_t* starts, std::int32_t* leng
     }
 }
 
-__global__ void calculate_tiles_per_read(std::int32_t* lengths,
+__global__ void calculate_tiles_per_read(std::int32_t* query_read_anchor_counts,
                                          const int32_t num_reads,
                                          const int32_t tile_size,
                                          std::int32_t* tiles_per_read)
@@ -67,8 +67,8 @@ __global__ void calculate_tiles_per_read(std::int32_t* lengths,
     int32_t d_thread_id = blockIdx.x * blockDim.x + threadIdx.x;
     if (d_thread_id < num_reads)
     {
-        int32_t n_integer_blocks    = lengths[d_thread_id] / tile_size;
-        int32_t remainder           = lengths[d_thread_id] % tile_size;
+        int32_t n_integer_blocks    = query_read_anchor_counts[d_thread_id] / tile_size;
+        int32_t remainder           = query_read_anchor_counts[d_thread_id] % tile_size;
         tiles_per_read[d_thread_id] = remainder == 0 ? n_integer_blocks : n_integer_blocks + 1;
     }
 }
@@ -79,12 +79,12 @@ __global__ void calculate_tile_starts(std::int32_t* query_starts,
                                       const int32_t tile_size,
                                       int32_t num_queries)
 {
-    int32_t d_thread_id = blockIdx.x * blockDim.x + threadIdx.x;
-    if (d_thread_id < num_queries)
+    int32_t counter = 0;
+    for (int32_t i = 0; i < num_queries; ++i)
     {
-        for (int i = 0; i < tiles_per_query[d_thread_id]; ++i)
+        for (int32_t j = 0; j < tiles_per_query[i]; ++j)
         {
-            tile_starts[d_thread_id + i] = query_starts[d_thread_id] + (i * tile_size);
+            tile_starts[counter] = query_starts[i] + (j * tile_size);
         }
     }
 }
@@ -170,7 +170,8 @@ void encode_anchor_query_locations(const Anchor* anchors,
         cub::DeviceReduce::Sum(d_temp_storage, temp_storage_bytes, tiles_per_query.data(), d_n_query_tiles.data(), n_queries);
 
         n_query_tiles = cudautils::get_value_from_device(d_n_query_tiles.data(), _cuda_stream);
-        calculate_tile_starts<<<(n_queries / block_size) + 1, 32, 0, _cuda_stream>>>(query_starts.data(), tiles_per_query.data(), tile_starts.data(), tile_size, n_queries);
+        calculate_tile_starts<<<1, 1, 0, _cuda_stream>>>(query_starts.data(), tiles_per_query.data(), tile_starts.data(), tile_size, n_queries);
+        std::cerr << "Generated " << n_query_tiles << " tiles." << std::endl;
     }
 }
 

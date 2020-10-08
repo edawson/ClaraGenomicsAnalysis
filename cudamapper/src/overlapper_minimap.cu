@@ -54,7 +54,7 @@ namespace cudamapper
 #define TILE_SIZE 1024
 #define TILING_WINDOW_END (TILE_SIZE + PREDECESSOR_SEARCH_ITERATIONS + 1)
 #define THREADS_PER_BLOCK PREDECESSOR_SEARCH_ITERATIONS
-#define BLOCK_COUNT 1792
+#define BLOCK_COUNT 1024
 
 #define MAX_CHAINS_PER_TILE 5
 
@@ -353,11 +353,133 @@ __device__ __forceinline__ int32_t log_linear_anchor_weight(const Anchor& a,
     return score;
 }
 
+__global__ void chain_anchors_in_read(const Anchor* anchors,
+                                      double* scores,
+                                      int32_t* predecessors,
+                                      bool* anchor_select_mask,
+                                      const int32_t* query_starts,
+                                      const int32_t* query_ends,
+                                      const int32_t batch_id,
+                                      const int32_t batch_size,
+                                      const int32_t num_anchors,
+                                      const int32_t num_queries,
+                                      const int32_t word_size,
+                                      const int32_t max_distance,
+                                      const int32_t max_bandwidth)
+{
+    int32_t block_id           = blockIdx.x;  // Each block processes one read-tile of data.
+    int32_t thread_id_in_block = threadIdx.x; // Equivalent to "j." Represents the end of a sliding window.
+
+    int32_t batch_block_id = batch_id * batch_size + block_id;
+
+    if (batch_block_id < num_queries)
+    {
+
+        printf("batch-block: %d\n", batch_block_id);
+        int32_t tile_start = query_starts[batch_block_id];
+        int32_t tile_end   = query_ends[batch_block_id];
+        printf("%d %d\n", tile_start, tile_end);
+
+        int32_t global_write_index = tile_start;
+        int32_t global_read_index  = tile_start + thread_id_in_block;
+        // printf("%d %d %d %d\n", block_id, global_write_index, global_read_index, tile_start);
+        if (global_write_index < num_anchors)
+        {
+            __shared__ Anchor block_anchor_cache[PREDECESSOR_SEARCH_ITERATIONS];
+            __shared__ bool block_max_select_mask[PREDECESSOR_SEARCH_ITERATIONS];
+            __shared__ int32_t block_score_cache[PREDECESSOR_SEARCH_ITERATIONS];
+            __shared__ int32_t block_predecessor_cache[PREDECESSOR_SEARCH_ITERATIONS];
+
+            // Initialize the local caches
+            block_anchor_cache[thread_id_in_block]      = anchors[global_read_index];
+            block_score_cache[thread_id_in_block]       = static_cast<int32_t>(scores[global_read_index]);
+            block_predecessor_cache[thread_id_in_block] = predecessors[global_read_index];
+            block_max_select_mask[thread_id_in_block]   = false;
+
+            for (int32_t i = PREDECESSOR_SEARCH_ITERATIONS, counter = 0; counter < tile_end; ++counter, ++i)
+            {
+                __syncthreads();
+                Anchor possible_successor_anchor = block_anchor_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
+                int32_t current_score            = block_score_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
+                int32_t current_pred             = block_predecessor_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
+                bool current_mask                = block_max_select_mask[i % PREDECESSOR_SEARCH_ITERATIONS];
+                if (current_score <= word_size)
+                {
+                    current_score = word_size;
+                    current_pred  = -1;
+                    current_mask  = false;
+                }
+                __syncthreads();
+
+                if (thread_id_in_block == i % PREDECESSOR_SEARCH_ITERATIONS && global_read_index + i < num_anchors)
+                {
+                    // Implies that the thread is at the right_side (head, front) of a window
+                    // Read in the anchor, score, and predecessor of the next anchor in memory.
+                    block_anchor_cache[thread_id_in_block]      = anchors[global_read_index + i];
+                    block_score_cache[thread_id_in_block]       = 0;
+                    block_predecessor_cache[thread_id_in_block] = -1;
+                    block_max_select_mask[thread_id_in_block]   = false;
+                    //block_score_cache[thread_id_in_block]       = scores[global_read_index + i];
+                    //block_predecessor_cache[thread_id_in_block] = predecessors[global_read_index + i];
+                    //block_max_select_mask[thread_id_in_block] = anchor_select_mask[global_read_index + i];
+                }
+
+                __syncthreads();
+                // Calculate score
+                int32_t marginal_score = log_linear_anchor_weight(possible_successor_anchor, block_anchor_cache[thread_id_in_block], word_size, max_distance, max_bandwidth);
+                // printf("%d %d | %d %d : %d %d : %d | %d %d %d %d | %d %d %d %d\n",
+                //        thread_id_in_block, (i % PREDECESSOR_SEARCH_ITERATIONS), counter,
+                //        i,
+                //        current_score,
+                //        marginal_score,
+                //        block_score_cache[thread_id_in_block],
+                //        block_anchor_cache[thread_id_in_block].query_read_id_,
+                //        block_anchor_cache[thread_id_in_block].query_position_in_read_,
+                //        block_anchor_cache[thread_id_in_block].target_read_id_,
+                //        block_anchor_cache[thread_id_in_block].target_position_in_read_,
+                //        possible_successor_anchor.query_read_id_,
+                //        possible_successor_anchor.query_position_in_read_,
+                //        possible_successor_anchor.target_read_id_,
+                //        possible_successor_anchor.target_position_in_read_);
+                __syncthreads();
+
+                if (current_score + marginal_score >= block_score_cache[thread_id_in_block] && (global_read_index + i) < num_anchors)
+                {
+                    //current_score                               = current_score + marginal_score;
+                    //current_pred                                = tile_start + counter - 1;
+                    block_score_cache[thread_id_in_block]       = current_score + marginal_score;
+                    block_predecessor_cache[thread_id_in_block] = tile_start + counter;
+                    if (current_score + marginal_score > word_size)
+                    {
+                        // block_max_select_mask[thread_id_in_block]                = true;
+                        // block_max_select_mask[i % PREDECESSOR_SEARCH_ITERATIONS] = false;
+                    }
+
+                    //block_max_select_mask[i % PREDECESSOR_SEARCH_ITERATIONS] = false;
+                }
+                __syncthreads();
+
+                if (thread_id_in_block == counter % PREDECESSOR_SEARCH_ITERATIONS && (global_write_index + counter) < num_anchors)
+                {
+                    // Position thread_id_in_block is at the left-side (tail) of the window.
+                    // It has therefore completed n = PREDECESSOR_SEARCH_ITERATIONS iterations.
+                    // It's final score is known.
+                    // Write its score and predecessor to the global_write_index + counter.
+                    scores[global_write_index + counter]             = static_cast<double>(current_score);
+                    predecessors[global_write_index + counter]       = current_pred;
+                    anchor_select_mask[global_write_index + counter] = current_mask;
+                }
+                __syncthreads();
+            }
+        }
+    }
+}
+
 ///
 /// \brief Chains one tile of anchors within a read-tile
-/// This tile may contain anchors from a single read or multiple
-/// reads.
-/// Each block starts within one reads and proceeds tile_size iterations
+/// This tile may contain anchors from a single target read or multiple
+/// target AND query reads.
+/// Each block starts within one read and proceeds tile_size iterations
 /// forward, sliding a window size PREDECESSOR_SEARCH_ITERATIONS along
 /// a tile of TILE_SIZE anchors.
 ///
@@ -733,23 +855,24 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
     // in a previous batch or are in the current tile.
     if (num_batches < 1)
         num_batches = 1;
-    for (std::size_t batch = 0; batch < static_cast<size_t>(num_batches); ++batch)
+    for (std::int32_t batch = 0; batch < num_batches; ++batch)
     {
 
-        //std::cerr << "Running batch " << batch << ". Num anchors: " << n_anchors << std::endl;
+        std::cerr << "Running batch " << batch << ". Num anchors: " << n_anchors << std::endl;
         // Launch one block per read-tile and process the anchors within that tile (one anchor per thread)
-        chain_anchors_in_block<<<BLOCK_COUNT, PREDECESSOR_SEARCH_ITERATIONS, 0, _cuda_stream>>>(d_anchors.data(),
-                                                                                                d_anchor_scores.data(),
-                                                                                                d_anchor_predecessors.data(),
-                                                                                                d_overlaps_select_mask.data(),
-                                                                                                d_tile_starts.data(),
-                                                                                                n_anchors,
-                                                                                                n_query_tiles,
-                                                                                                batch,
-                                                                                                TILE_SIZE,
-                                                                                                15,
-                                                                                                5000,
-                                                                                                500);
+        chain_anchors_in_read<<<BLOCK_COUNT, PREDECESSOR_SEARCH_ITERATIONS, 0, _cuda_stream>>>(d_anchors.data(),
+                                                                                               d_anchor_scores.data(),
+                                                                                               d_anchor_predecessors.data(),
+                                                                                               d_overlaps_select_mask.data(),
+                                                                                               query_id_starts.data(),
+                                                                                               query_id_ends.data(),
+                                                                                               batch,
+                                                                                               BLOCK_COUNT,
+                                                                                               n_anchors,
+                                                                                               n_queries,
+                                                                                               15,
+                                                                                               5000,
+                                                                                               500);
     }
 
 // #define DEBUG_CHAINS
@@ -826,7 +949,7 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
                                                                                  all_to_all,
                                                                                  false,
                                                                                  0.8,
-                                                                                 10);
+                                                                                 0);
     drop_overlaps_by_mask(d_overlaps_dest,
                           d_overlaps_select_mask,
                           n_filtered_overlaps, d_overlaps_source,
