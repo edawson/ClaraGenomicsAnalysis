@@ -154,13 +154,12 @@ __global__ void mask_overlaps(Overlap* overlaps, std::size_t n_overlaps, bool* s
 {
     int32_t d_tid       = blockIdx.x * blockDim.x + threadIdx.x;
     int32_t grid_stride = blockDim.x * gridDim.x;
-    for (int32_t i = 0; i < n_overlaps; i += grid_stride)
+    for (int32_t i = d_tid; i < n_overlaps; i += grid_stride)
     {
         Overlap current_overlap                  = overlaps[i];
         position_in_read_t overlap_query_length  = current_overlap.query_end_position_in_read_ - current_overlap.query_start_position_in_read_;
         position_in_read_t overlap_target_length = current_overlap.target_end_position_in_read_ - current_overlap.target_start_position_in_read_;
         //const bool mask_self_self                = overlaps[d_tid].query_read_id_ == overlaps[d_tid].target_read_id_ && all_to_all && filter_self_mappings;
-        const bool mask_self_self     = false;
         auto query_bases_per_residue  = static_cast<double>(overlap_query_length) / static_cast<double>(current_overlap.num_residues_);
         auto target_bases_per_residue = static_cast<double>(overlap_target_length) / static_cast<double>(current_overlap.num_residues_);
         select_mask[i] &= overlap_query_length >= min_overlap_length & overlap_target_length >= min_overlap_length;
@@ -388,11 +387,13 @@ __global__ void chain_anchors_in_read(const Anchor* anchors,
             __shared__ Anchor block_anchor_cache[PREDECESSOR_SEARCH_ITERATIONS];
             __shared__ int32_t block_score_cache[PREDECESSOR_SEARCH_ITERATIONS];
             __shared__ int32_t block_predecessor_cache[PREDECESSOR_SEARCH_ITERATIONS];
+            __shared__ int32_t block_max_select_mask[PREDECESSOR_SEARCH_ITERATIONS];
 
             // Initialize the local caches
             block_anchor_cache[thread_id_in_block]      = anchors[global_read_index];
             block_score_cache[thread_id_in_block]       = static_cast<int32_t>(scores[global_read_index]);
             block_predecessor_cache[thread_id_in_block] = predecessors[global_read_index];
+            block_max_select_mask[thread_id_in_block]   = true;
 
             for (int32_t i = PREDECESSOR_SEARCH_ITERATIONS, counter = 0; counter < tile_end; ++counter, ++i)
             {
@@ -400,10 +401,12 @@ __global__ void chain_anchors_in_read(const Anchor* anchors,
                 Anchor possible_successor_anchor = block_anchor_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
                 int32_t current_score            = block_score_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
                 int32_t current_pred             = block_predecessor_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
+                bool current_mask                = block_max_select_mask[i % PREDECESSOR_SEARCH_ITERATIONS];
                 if (current_score <= word_size)
                 {
                     current_score = word_size;
                     current_pred  = -1;
+                    current_mask  = false;
                 }
                 __syncthreads();
 
@@ -414,10 +417,7 @@ __global__ void chain_anchors_in_read(const Anchor* anchors,
                     block_anchor_cache[thread_id_in_block]      = anchors[global_read_index + i];
                     block_score_cache[thread_id_in_block]       = 0;
                     block_predecessor_cache[thread_id_in_block] = -1;
-                    //block_max_select_mask[thread_id_in_block]   = false;
-                    //block_score_cache[thread_id_in_block]       = scores[global_read_index + i];
-                    //block_predecessor_cache[thread_id_in_block] = predecessors[global_read_index + i];
-                    //block_max_select_mask[thread_id_in_block] = anchor_select_mask[global_read_index + i];
+                    block_max_select_mask[thread_id_in_block]   = false;
                 }
 
                 __syncthreads();
@@ -440,17 +440,13 @@ __global__ void chain_anchors_in_read(const Anchor* anchors,
 
                 if (current_score + marginal_score >= block_score_cache[thread_id_in_block] && (global_read_index + i) < num_anchors)
                 {
-                    //current_score                               = current_score + marginal_score;
-                    //current_pred                                = tile_start + counter - 1;
                     block_score_cache[thread_id_in_block]       = current_score + marginal_score;
                     block_predecessor_cache[thread_id_in_block] = tile_start + counter;
                     if (current_score + marginal_score > word_size)
                     {
-                        // block_max_select_mask[thread_id_in_block]                = true;
+                        block_max_select_mask[thread_id_in_block] = true;
                         // block_max_select_mask[i % PREDECESSOR_SEARCH_ITERATIONS] = false;
                     }
-
-                    //block_max_select_mask[i % PREDECESSOR_SEARCH_ITERATIONS] = false;
                 }
                 __syncthreads();
 
@@ -460,9 +456,9 @@ __global__ void chain_anchors_in_read(const Anchor* anchors,
                     // It has therefore completed n = PREDECESSOR_SEARCH_ITERATIONS iterations.
                     // It's final score is known.
                     // Write its score and predecessor to the global_write_index + counter.
-                    scores[global_write_index + counter]       = static_cast<double>(current_score);
-                    predecessors[global_write_index + counter] = current_pred;
-                    //anchor_select_mask[global_write_index + counter] = current_mask;
+                    scores[global_write_index + counter]             = static_cast<double>(current_score);
+                    predecessors[global_write_index + counter]       = current_pred;
+                    anchor_select_mask[global_write_index + counter] = current_mask;
                 }
                 __syncthreads();
             }
@@ -602,7 +598,7 @@ __global__ void chain_anchors_in_block(const Anchor* anchors,
                     // Write its score and predecessor to the global_write_index + counter.
                     scores[global_write_index + counter]             = static_cast<double>(current_score);
                     predecessors[global_write_index + counter]       = current_pred;
-                    anchor_select_mask[global_write_index + counter] = block_max_select_mask[thread_id_in_block];
+                    anchor_select_mask[global_write_index + counter] = current_mask;
                 }
                 __syncthreads();
             }
@@ -856,7 +852,7 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
     }
 #endif
 
-    // mask_predecessors<<<BLOCK_COUNT, 64, 0, _cuda_stream>>>(d_anchor_predecessors.data(), d_overlaps_select_mask.data(), n_anchors);
+    mask_predecessors<<<BLOCK_COUNT, 64, 0, _cuda_stream>>>(d_anchor_predecessors.data(), d_overlaps_select_mask.data(), n_anchors);
     std::cerr << "Anchor predecessors masked." << std::endl;
 
     int32_t num_chains = chainerutils::count_unmasked(d_overlaps_select_mask.data(), n_anchors, _allocator, _cuda_stream);
@@ -906,14 +902,6 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
     //     }
     // #endif
 
-    drop_overlaps_by_mask(d_overlaps_dest,
-                          d_overlaps_select_mask,
-                          n_filtered_overlaps, d_overlaps_source,
-                          d_n_filtered_overlaps,
-                          _allocator,
-                          _cuda_stream);
-    n_filtered_overlaps = cudautils::get_value_from_device(d_n_filtered_overlaps.data(), _cuda_stream);
-
     device_buffer<double> d_overlap_scores_dest(n_filtered_overlaps, _allocator, _cuda_stream);
     drop_scores_by_mask(d_anchor_scores,
                         d_overlaps_select_mask,
@@ -924,7 +912,7 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
                         _cuda_stream);
     std::cerr << "Writing " << n_filtered_overlaps << " overlaps." << std::endl;
     fused_overlaps.resize(n_filtered_overlaps);
-    cudautils::device_copy_n(d_overlaps_source.data(), n_filtered_overlaps, fused_overlaps.data(), _cuda_stream);
+    cudautils::device_copy_n(d_overlaps_dest.data(), n_filtered_overlaps, fused_overlaps.data(), _cuda_stream);
 
     // This is not completely necessary, but if removed one has to make sure that the next step
     // uses the same stream or that sync is done in caller
