@@ -152,27 +152,29 @@ __global__ void mask_overlaps(Overlap* overlaps, std::size_t n_overlaps, bool* s
                               const double max_percent_reciprocal,
                               const int32_t max_reciprocal_iterations)
 {
-    std::size_t d_tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (d_tid < n_overlaps)
+    int32_t d_tid       = blockIdx.x * blockDim.x + threadIdx.x;
+    int32_t grid_stride = blockDim.x * gridDim.x;
+    for (int32_t i = 0; i < n_overlaps; i += grid_stride)
     {
-        position_in_read_t overlap_query_length  = overlaps[d_tid].query_end_position_in_read_ - overlaps[d_tid].query_start_position_in_read_;
-        position_in_read_t overlap_target_length = overlaps[d_tid].target_end_position_in_read_ - overlaps[d_tid].target_start_position_in_read_;
+        Overlap current_overlap                  = overlaps[i];
+        position_in_read_t overlap_query_length  = current_overlap.query_end_position_in_read_ - current_overlap.query_start_position_in_read_;
+        position_in_read_t overlap_target_length = current_overlap.target_end_position_in_read_ - current_overlap.target_start_position_in_read_;
         //const bool mask_self_self                = overlaps[d_tid].query_read_id_ == overlaps[d_tid].target_read_id_ && all_to_all && filter_self_mappings;
         const bool mask_self_self     = false;
-        auto query_bases_per_residue  = static_cast<double>(overlap_query_length) / static_cast<double>(overlaps[d_tid].num_residues_);
-        auto target_bases_per_residue = static_cast<double>(overlap_target_length) / static_cast<double>(overlaps[d_tid].num_residues_);
-        select_mask[d_tid] &= overlap_query_length >= min_overlap_length & overlap_target_length >= min_overlap_length;
-        select_mask[d_tid] &= overlaps[d_tid].num_residues_ >= min_residues;
+        auto query_bases_per_residue  = static_cast<double>(overlap_query_length) / static_cast<double>(current_overlap.num_residues_);
+        auto target_bases_per_residue = static_cast<double>(overlap_target_length) / static_cast<double>(current_overlap.num_residues_);
+        select_mask[i] &= overlap_query_length >= min_overlap_length & overlap_target_length >= min_overlap_length;
+        select_mask[i] &= current_overlap.num_residues_ >= min_residues;
         //mask[d_tid] &= !mask_self_self;
-        select_mask[d_tid] &= (query_bases_per_residue < max_bases_per_residue && target_bases_per_residue < max_bases_per_residue);
-        for (int32_t i = d_tid + 1; i < d_tid + max_reciprocal_iterations; ++i)
-        {
-            if (i < n_overlaps)
-            {
-                if (percent_reciprocal_overlap(overlaps[d_tid], overlaps[i]) > max_percent_reciprocal || contained_overlap(overlaps[d_tid], overlaps[i]))
-                    select_mask[d_tid] = false;
-            }
-        }
+        select_mask[i] &= (query_bases_per_residue < max_bases_per_residue && target_bases_per_residue < max_bases_per_residue);
+        // for (int32_t i = d_tid + 1; i < d_tid + max_reciprocal_iterations; ++i)
+        // {
+        //     if (i < n_overlaps)
+        //     {
+        //         if (percent_reciprocal_overlap(overlaps[d_tid], overlaps[i]) > max_percent_reciprocal || contained_overlap(overlaps[d_tid], overlaps[i]))
+        //             select_mask[d_tid] = false;
+        //     }
+        // }
     }
 }
 
@@ -384,7 +386,6 @@ __global__ void chain_anchors_in_read(const Anchor* anchors,
         if (global_write_index < num_anchors)
         {
             __shared__ Anchor block_anchor_cache[PREDECESSOR_SEARCH_ITERATIONS];
-            __shared__ bool block_max_select_mask[PREDECESSOR_SEARCH_ITERATIONS];
             __shared__ int32_t block_score_cache[PREDECESSOR_SEARCH_ITERATIONS];
             __shared__ int32_t block_predecessor_cache[PREDECESSOR_SEARCH_ITERATIONS];
 
@@ -392,7 +393,6 @@ __global__ void chain_anchors_in_read(const Anchor* anchors,
             block_anchor_cache[thread_id_in_block]      = anchors[global_read_index];
             block_score_cache[thread_id_in_block]       = static_cast<int32_t>(scores[global_read_index]);
             block_predecessor_cache[thread_id_in_block] = predecessors[global_read_index];
-            block_max_select_mask[thread_id_in_block]   = false;
 
             for (int32_t i = PREDECESSOR_SEARCH_ITERATIONS, counter = 0; counter < tile_end; ++counter, ++i)
             {
@@ -400,12 +400,10 @@ __global__ void chain_anchors_in_read(const Anchor* anchors,
                 Anchor possible_successor_anchor = block_anchor_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
                 int32_t current_score            = block_score_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
                 int32_t current_pred             = block_predecessor_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
-                bool current_mask                = block_max_select_mask[i % PREDECESSOR_SEARCH_ITERATIONS];
                 if (current_score <= word_size)
                 {
                     current_score = word_size;
                     current_pred  = -1;
-                    current_mask  = false;
                 }
                 __syncthreads();
 
@@ -531,7 +529,7 @@ __global__ void chain_anchors_in_block(const Anchor* anchors,
             block_anchor_cache[thread_id_in_block]      = anchors[global_read_index];
             block_score_cache[thread_id_in_block]       = static_cast<int32_t>(scores[global_read_index]);
             block_predecessor_cache[thread_id_in_block] = predecessors[global_read_index];
-            block_max_select_mask[thread_id_in_block]   = true;
+            block_max_select_mask[thread_id_in_block]   = false;
 
             for (int32_t i = PREDECESSOR_SEARCH_ITERATIONS, counter = 0; counter < batch_size; ++counter, ++i)
             {
@@ -604,7 +602,7 @@ __global__ void chain_anchors_in_block(const Anchor* anchors,
                     // Write its score and predecessor to the global_write_index + counter.
                     scores[global_write_index + counter]             = static_cast<double>(current_score);
                     predecessors[global_write_index + counter]       = current_pred;
-                    anchor_select_mask[global_write_index + counter] = current_mask;
+                    anchor_select_mask[global_write_index + counter] = block_max_select_mask[thread_id_in_block];
                 }
                 __syncthreads();
             }
@@ -646,41 +644,17 @@ __device__ __forceinline__ void add_anchor_to_overlap(const Anchor& anchor, Over
     ++overlap.num_residues_;
 }
 
-__global__ void produce_anchor_chains(const Anchor* anchors,
-                                      Overlap* overlaps,
-                                      double* scores,
-                                      bool* max_select_mask,
-                                      int32_t* predecessors,
-                                      const int32_t n_anchors,
-                                      const int32_t min_score)
+__global__ void mask_predecessors(const int32_t* predecessors,
+                                  bool* max_select_mask,
+                                  const int32_t num_anchors)
 {
-    const std::size_t d_tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (d_tid < n_anchors)
+    const int32_t d_tid       = blockIdx.x * blockDim.x + threadIdx.x;
+    const int32_t grid_stride = blockDim.x * gridDim.x;
+    for (int32_t i = d_tid; i < num_anchors; i += grid_stride)
     {
-        // printf("Anchor ID: %d, %c, %d, %d\n", static_cast<int>(d_tid), (max_select_mask[d_tid] ? 'M' : '.'), static_cast<int>(scores[d_tid]), predecessors[d_tid]);
-        if (scores[d_tid] >= min_score)
-        {
-            int32_t global_overlap_index = d_tid;
-            int32_t index                = global_overlap_index;
-            Overlap final_overlap        = overlaps[global_overlap_index];
-            Anchor first_anchor          = anchors[global_overlap_index];
-            double final_score           = scores[global_overlap_index];
-            init_overlap(final_overlap);
-            add_anchor_to_overlap(anchors[global_overlap_index], final_overlap);
-            while (index != -1 && index != predecessors[index])
-            {
-                int32_t pred = predecessors[index];
-                if (pred != -1)
-                {
-                    add_anchor_to_overlap(anchors[pred], final_overlap);
-                    printf("| %d %d %d %d | -> | %d %d %d %d |\n", anchors[index].query_read_id_, anchors[index].query_position_in_read_, anchors[index].target_read_id_, anchors[index].target_position_in_read_,
-                           anchors[pred].query_read_id_, anchors[pred].query_position_in_read_, anchors[pred].target_read_id_, anchors[pred].target_position_in_read_);
-                    max_select_mask[pred] = false;
-                }
-                index = predecessors[index];
-            }
-            overlaps[global_overlap_index] = final_overlap;
-        }
+        int32_t pred_index          = predecessors[i];
+        pred_index                  = pred_index == -1 ? i : pred_index;
+        max_select_mask[pred_index] = false;
     }
 }
 
@@ -809,7 +783,7 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
 
     init_overlap_mask<<<(n_anchors / block_size) + 1, block_size, 0, _cuda_stream>>>(d_overlaps_select_mask.data(),
                                                                                      n_anchors,
-                                                                                     false);
+                                                                                     true);
 
     init_overlap_scores_to_value<<<(n_anchors / block_size) + 1, block_size, 0, _cuda_stream>>>(d_anchor_scores.data(), 1.0, n_anchors);
 
@@ -841,17 +815,12 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
                                                 _cuda_stream,
                                                 32);
 
-    int32_t num_batches = (n_queries / BLOCK_COUNT);
+    int32_t num_batches = (n_queries / BLOCK_COUNT) + 1;
 
-    // We use batches to ensure that for each anchor, the
-    // scores and predecessors up to that anchor have been generated
-    // in a previous batch or are in the current tile.
-    if (num_batches < 1)
-        num_batches = 1;
     for (std::int32_t batch = 0; batch < num_batches; ++batch)
     {
 
-        std::cerr << "Running batch " << batch << ". Num anchors: " << n_anchors << std::endl;
+        std::cerr << "Running batch " << batch << " of " << num_batches << ". Num anchors: " << n_anchors << std::endl;
         // Launch one block per read-tile and process the anchors within that tile (one anchor per thread)
         chain_anchors_in_read<<<BLOCK_COUNT, PREDECESSOR_SEARCH_ITERATIONS, 0, _cuda_stream>>>(d_anchors.data(),
                                                                                                d_anchor_scores.data(),
@@ -887,29 +856,30 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
     }
 #endif
 
-    produce_anchor_chains<<<(n_anchors / block_size) + 1, block_size, 0, _cuda_stream>>>(d_anchors.data(),
-                                                                                         d_overlaps_source.data(),
-                                                                                         d_anchor_scores.data(),
-                                                                                         d_overlaps_select_mask.data(),
-                                                                                         d_anchor_predecessors.data(),
-                                                                                         n_anchors,
-                                                                                         20);
+    // mask_predecessors<<<BLOCK_COUNT, 64, 0, _cuda_stream>>>(d_anchor_predecessors.data(), d_overlaps_select_mask.data(), n_anchors);
+    std::cerr << "Anchor predecessors masked." << std::endl;
 
-    d_overlaps_select_mask.clear_and_resize(n_anchors);
-    init_overlap_mask<<<(n_anchors / block_size) + 1, block_size, 0, _cuda_stream>>>(d_overlaps_select_mask.data(),
-                                                                                     n_anchors,
-                                                                                     true);
+    int32_t num_chains = chainerutils::count_unmasked(d_overlaps_select_mask.data(), n_anchors, _allocator, _cuda_stream);
+    std::cerr << num_chains << " total chains after masking." << std::endl;
 
-    mask_overlaps<<<(n_anchors / block_size) + 1, block_size, 0, _cuda_stream>>>(d_overlaps_source.data(),
-                                                                                 n_anchors,
-                                                                                 d_overlaps_select_mask.data(),
-                                                                                 min_overlap_len,
-                                                                                 min_residues,
-                                                                                 min_bases_per_residue,
-                                                                                 all_to_all,
-                                                                                 false,
-                                                                                 0.8,
-                                                                                 0);
+    chainerutils::chain_anchors_by_backtrace<<<(n_anchors / block_size) + 1, block_size, 0, _cuda_stream>>>(d_anchors.data(),
+                                                                                                            d_overlaps_source.data(),
+                                                                                                            d_anchor_scores.data(),
+                                                                                                            d_overlaps_select_mask.data(),
+                                                                                                            d_anchor_predecessors.data(),
+                                                                                                            n_anchors,
+                                                                                                            40);
+
+    mask_overlaps<<<BLOCK_COUNT, 64, 0, _cuda_stream>>>(d_overlaps_source.data(),
+                                                        n_anchors,
+                                                        d_overlaps_select_mask.data(),
+                                                        min_overlap_len,
+                                                        min_residues,
+                                                        min_bases_per_residue,
+                                                        all_to_all,
+                                                        false,
+                                                        0.8,
+                                                        0);
 
     device_buffer<int32_t> d_n_filtered_overlaps(1, _allocator, _cuda_stream);
     drop_overlaps_by_mask(d_overlaps_source,
@@ -920,7 +890,7 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
                           _allocator,
                           _cuda_stream);
     int32_t n_filtered_overlaps = cudautils::get_value_from_device(d_n_filtered_overlaps.data(), _cuda_stream);
-    std::cerr << "Number of chains: " << n_filtered_overlaps << std::endl;
+    // std::cerr << "Number of chains: " << n_filtered_overlaps << std::endl;
 
     // // #define DEBUG_INIT_OVERLAPS
     // #ifdef DEBUG_INIT_OVERLAPS
@@ -936,18 +906,6 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
     //     }
     // #endif
 
-    d_overlaps_select_mask.clear_and_resize(n_filtered_overlaps);
-    init_overlap_mask<<<(n_filtered_overlaps / block_size) + 1, block_size, 0, _cuda_stream>>>(d_overlaps_select_mask.data(), n_filtered_overlaps, true);
-    mask_overlaps<<<(n_anchors / block_size) + 1, block_size, 0, _cuda_stream>>>(d_overlaps_dest.data(),
-                                                                                 n_filtered_overlaps,
-                                                                                 d_overlaps_select_mask.data(),
-                                                                                 min_overlap_len,
-                                                                                 min_residues,
-                                                                                 min_bases_per_residue,
-                                                                                 all_to_all,
-                                                                                 false,
-                                                                                 0.8,
-                                                                                 0);
     drop_overlaps_by_mask(d_overlaps_dest,
                           d_overlaps_select_mask,
                           n_filtered_overlaps, d_overlaps_source,

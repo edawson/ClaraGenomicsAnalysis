@@ -38,8 +38,6 @@ namespace cudamapper
 namespace chainerutils
 {
 
-#define MAX_CHAINS_PER_TILE 5
-
 struct QueryTargetPair
 {
     int32_t query_read_id_;
@@ -87,13 +85,22 @@ struct AnchorToQueryTargetPairOp
     }
 };
 
+struct BoolToIntConverter
+{
+    __device__ __forceinline__ int32_t operator()(const bool a) const
+    {
+        return a ? 1 : 0;
+    }
+};
+
 struct ChainResult
 {
-    int32_t start_anchor_index;
-    int32_t end_anchor_index;
-    int32_t tile_id;
-    int32_t total_score;
-    int32_t num_anchors;
+    bool is_null               = true;
+    int32_t start_anchor_index = -1;
+    int32_t end_anchor_index   = -1;
+    int32_t tile_id            = -1;
+    int32_t total_score        = 0;
+    int32_t num_anchors        = 0;
 };
 
 __device__ bool
@@ -133,6 +140,19 @@ void encode_anchor_query_target_pairs(const Anchor* anchors,
                                       DefaultDeviceAllocator& _allocator,
                                       cudaStream_t& _cuda_stream,
                                       int32_t block_size);
+
+int32_t count_unmasked(const bool* mask,
+                       int32_t n_values,
+                       DefaultDeviceAllocator& _allocator,
+                       cudaStream_t& _cuda_stream);
+
+__global__ void chain_anchors_by_backtrace(const Anchor* anchors,
+                                           Overlap* overlaps,
+                                           double* scores,
+                                           bool* max_select_mask,
+                                           int32_t* predecessors,
+                                           const int32_t n_anchors,
+                                           const int32_t min_score);
 
 void encode_overlap_query_target_pairs(Overlap* overlaps,
                                        int32_t n_overlaps,

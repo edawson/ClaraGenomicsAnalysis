@@ -89,6 +89,122 @@ __global__ void calculate_tile_starts(std::int32_t* query_starts,
     }
 }
 
+int32_t count_unmasked(const bool* mask,
+                       int32_t n_values,
+                       DefaultDeviceAllocator& _allocator,
+                       cudaStream_t& _cuda_stream)
+{
+    device_buffer<char> d_temp_buf(_allocator, _cuda_stream);
+    void* d_temp_storage           = nullptr;
+    std::size_t temp_storage_bytes = 0;
+
+    device_buffer<int32_t> d_num_unmasked(1, _allocator, _cuda_stream);
+
+    BoolToIntConverter converter_op;
+    cub::TransformInputIterator<int32_t, BoolToIntConverter, const bool*> d_bool_ints(mask, converter_op);
+
+    cub::DeviceReduce::Sum(d_temp_storage,
+                           temp_storage_bytes,
+                           d_bool_ints,
+                           d_num_unmasked.data(),
+                           n_values);
+
+    d_temp_buf.clear_and_resize(temp_storage_bytes);
+    d_temp_storage = d_temp_buf.data();
+
+    cub::DeviceReduce::Sum(d_temp_storage,
+                           temp_storage_bytes,
+                           d_bool_ints,
+                           d_num_unmasked.data(),
+                           n_values);
+    int32_t num_unmasked = cudautils::get_value_from_device(d_num_unmasked.data(), _cuda_stream);
+    return num_unmasked;
+}
+
+__device__ Overlap create_simple_overlap(const Anchor& start, const Anchor& end, const int32_t num_anchors)
+{
+    Overlap overlap;
+    overlap.num_residues_ = num_anchors;
+
+    overlap.query_read_id_  = start.query_read_id_;
+    overlap.target_read_id_ = start.target_read_id_;
+
+    overlap.query_start_position_in_read_ = min(start.query_position_in_read_, end.query_position_in_read_);
+    overlap.query_end_position_in_read_   = max(start.query_position_in_read_, end.query_position_in_read_);
+    bool is_negative_strand               = end.target_position_in_read_ < start.target_position_in_read_;
+    if (is_negative_strand)
+    {
+        overlap.relative_strand                = RelativeStrand::Reverse;
+        overlap.target_start_position_in_read_ = end.target_position_in_read_;
+        overlap.target_end_position_in_read_   = start.target_position_in_read_;
+    }
+    else
+    {
+        overlap.relative_strand                = RelativeStrand::Forward;
+        overlap.target_start_position_in_read_ = start.target_position_in_read_;
+        overlap.target_end_position_in_read_   = end.target_position_in_read_;
+    }
+    return overlap;
+}
+
+__device__ __forceinline__ Overlap empty_overlap()
+{
+    Overlap empty;
+    empty.query_read_id_                 = 0;
+    empty.query_start_position_in_read_  = 0;
+    empty.query_end_position_in_read_    = 0;
+    empty.target_read_id_                = 0;
+    empty.target_start_position_in_read_ = 0;
+    empty.target_end_position_in_read_   = 0;
+    empty.num_residues_                  = 0;
+    return empty;
+}
+
+__global__ void chain_anchors_by_backtrace(const Anchor* anchors,
+                                           Overlap* overlaps,
+                                           double* scores,
+                                           bool* max_select_mask,
+                                           int32_t* predecessors,
+                                           const int32_t n_anchors,
+                                           const int32_t min_score)
+{
+    const std::size_t d_tid = blockIdx.x * blockDim.x + threadIdx.x;
+    if (d_tid < n_anchors)
+    {
+        // printf("Anchor ID: %d, %c, %d, %d\n", static_cast<int>(d_tid), (max_select_mask[d_tid] ? 'M' : '.'), static_cast<int>(scores[d_tid]), predecessors[d_tid]);
+        if (scores[d_tid] >= min_score)
+        {
+
+            int32_t global_overlap_index          = d_tid;
+            max_select_mask[global_overlap_index] = true;
+            int32_t index                         = global_overlap_index;
+            Anchor first_anchor;
+            Anchor final_anchor          = anchors[global_overlap_index];
+            double final_score           = scores[global_overlap_index];
+            int32_t num_anchors_in_chain = 0;
+
+            while (index != -1)
+            {
+                int32_t pred = predecessors[index];
+                if (pred != -1)
+                {
+                    max_select_mask[pred] = false;
+                }
+                first_anchor = anchors[index];
+                num_anchors_in_chain++;
+                index = predecessors[index];
+            }
+            overlaps[global_overlap_index] = create_simple_overlap(first_anchor, final_anchor, num_anchors_in_chain);
+            Overlap final_overlap          = overlaps[global_overlap_index];
+            // printf("%d %d %d %d %d %d %d %f\n",
+            //        final_overlap.query_read_id_, final_overlap.query_start_position_in_read_, final_overlap.query_end_position_in_read_,
+            //        final_overlap.target_read_id_, final_overlap.target_start_position_in_read_, final_overlap.target_end_position_in_read_,
+            //        final_overlap.num_residues_,
+            //        final_score);
+        }
+    }
+}
+
 void encode_anchor_query_locations(const Anchor* anchors,
                                    int32_t n_anchors,
                                    int32_t tile_size,
