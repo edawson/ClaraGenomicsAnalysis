@@ -171,11 +171,12 @@ __global__ void chain_anchors_by_backtrace(const Anchor* anchors,
     const std::size_t d_tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (d_tid < n_anchors)
     {
+
+        int32_t global_overlap_index = d_tid;
         // printf("Anchor ID: %d, %c, %d, %d\n", static_cast<int>(d_tid), (max_select_mask[d_tid] ? 'M' : '.'), static_cast<int>(scores[d_tid]), predecessors[d_tid]);
         if (scores[d_tid] >= min_score)
         {
 
-            int32_t global_overlap_index          = d_tid;
             max_select_mask[global_overlap_index] = true;
             int32_t index                         = global_overlap_index;
             Anchor first_anchor;
@@ -195,12 +196,16 @@ __global__ void chain_anchors_by_backtrace(const Anchor* anchors,
                 index = predecessors[index];
             }
             overlaps[global_overlap_index] = create_simple_overlap(first_anchor, final_anchor, num_anchors_in_chain);
-            Overlap final_overlap          = overlaps[global_overlap_index];
+            // Overlap final_overlap          = overlaps[global_overlap_index];
             // printf("%d %d %d %d %d %d %d %f\n",
             //        final_overlap.query_read_id_, final_overlap.query_start_position_in_read_, final_overlap.query_end_position_in_read_,
             //        final_overlap.target_read_id_, final_overlap.target_start_position_in_read_, final_overlap.target_end_position_in_read_,
             //        final_overlap.num_residues_,
             //        final_score);
+        }
+        else
+        {
+            max_select_mask[global_overlap_index] = false;
         }
     }
 }
