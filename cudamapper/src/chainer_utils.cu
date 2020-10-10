@@ -128,6 +128,7 @@ __device__ Overlap create_simple_overlap(const Anchor& start, const Anchor& end,
 
     overlap.query_read_id_  = start.query_read_id_;
     overlap.target_read_id_ = start.target_read_id_;
+    assert(start.query_read_id_ == end.query_read_id_ && start.target_read_id_ == end.target_read_id_);
 
     overlap.query_start_position_in_read_ = min(start.query_position_in_read_, end.query_position_in_read_);
     overlap.query_end_position_in_read_   = max(start.query_position_in_read_, end.query_position_in_read_);
@@ -177,11 +178,9 @@ __global__ void chain_anchors_by_backtrace(const Anchor* anchors,
         if (scores[d_tid] >= min_score)
         {
 
-            max_select_mask[global_overlap_index] = true;
-            int32_t index                         = global_overlap_index;
+            int32_t index = global_overlap_index;
             Anchor first_anchor;
             Anchor final_anchor          = anchors[global_overlap_index];
-            double final_score           = scores[global_overlap_index];
             int32_t num_anchors_in_chain = 0;
 
             while (index != -1)
