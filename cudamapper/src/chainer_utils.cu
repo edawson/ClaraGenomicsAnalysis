@@ -174,26 +174,26 @@ __global__ void chain_anchors_by_backtrace(const Anchor* anchors,
     {
 
         int32_t global_overlap_index = d_tid;
-        // printf("Anchor ID: %d, %c, %d, %d\n", static_cast<int>(d_tid), (max_select_mask[d_tid] ? 'M' : '.'), static_cast<int>(scores[d_tid]), predecessors[d_tid]);
         if (scores[d_tid] >= min_score)
         {
 
-            int32_t index = global_overlap_index;
-            Anchor first_anchor;
-            Anchor final_anchor          = anchors[global_overlap_index];
+            int32_t index                = global_overlap_index;
+            int32_t first_index          = index;
             int32_t num_anchors_in_chain = 0;
+            Anchor final_anchor          = anchors[global_overlap_index];
 
             while (index != -1)
             {
+                first_index  = index;
                 int32_t pred = predecessors[index];
                 if (pred != -1)
                 {
                     max_select_mask[pred] = false;
                 }
-                first_anchor = anchors[index];
                 num_anchors_in_chain++;
                 index = predecessors[index];
             }
+            Anchor first_anchor            = anchors[first_index];
             overlaps[global_overlap_index] = create_simple_overlap(first_anchor, final_anchor, num_anchors_in_chain);
             // Overlap final_overlap          = overlaps[global_overlap_index];
             // printf("%d %d %d %d %d %d %d %f\n",
