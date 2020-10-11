@@ -46,6 +46,7 @@ endif()
 
 cuda_add_library(${MODULE_NAME}
         src/application_parameters.cpp
+        src/chainer_utils.cu
         src/cudamapper.cpp
         src/index_batcher.cu
         src/index_descriptor.cpp
@@ -59,6 +60,8 @@ cuda_add_library(${MODULE_NAME}
         src/cudamapper_utils.cpp
         src/overlapper.cpp
         src/overlapper_triggered.cu
+        src/overlapper_anchmer.cu
+        src/overlapper_minimap.cu
         src/utils.cpp
         ${CMAKE_CURRENT_BINARY_DIR}/version.cpp)
 

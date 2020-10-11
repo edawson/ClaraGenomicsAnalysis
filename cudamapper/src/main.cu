@@ -240,6 +240,7 @@ void process_one_device_batch(const IndexBatch& device_batch,
                     std::vector<Overlap> overlaps;
                     auto overlapper = Overlapper::create_overlapper(device_allocator,
                                                                     cuda_stream);
+
                     overlapper->get_overlaps(overlaps,
                                              matcher->anchors(),
                                              application_parameters.all_to_all,
@@ -368,6 +369,15 @@ void postprocess_and_write_thread_function(const int32_t device_id,
                                                 *application_parameters.target_parser,
                                                 50,
                                                 0.5);
+            }
+
+            if (application_parameters.all_to_all && application_parameters.drop_self_mappings)
+            {
+                GW_NVTX_RANGE(profiler, "main::postprocess_and_write_thread::remove_self_mappings");
+                ::claraparabricks::genomeworks::cudamapper::details::overlapper::filter_self_mappings(overlaps,
+                                                                                                      *application_parameters.query_parser,
+                                                                                                      *application_parameters.target_parser,
+                                                                                                      0.8);
             }
 
             // write to output

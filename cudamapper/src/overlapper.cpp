@@ -22,7 +22,8 @@
 
 #include "cudamapper_utils.hpp"
 #include "overlapper_triggered.hpp"
-
+#include "overlapper_anchmer.hpp"
+#include "overlapper_minimap.hpp"
 namespace
 {
 
@@ -134,6 +135,16 @@ namespace cudamapper
 
 void Overlapper::post_process_overlaps(std::vector<Overlap>& overlaps, const bool drop_fused_overlaps)
 {
+
+    const bool do_fusion = false;
+    auto overlaps_equal  = [](const Overlap& a, const Overlap& b) {
+        return a.query_read_id_ == b.query_read_id_ &&
+               a.target_read_id_ == b.target_read_id_ &&
+               a.query_start_position_in_read_ == b.query_start_position_in_read_ &&
+               a.query_end_position_in_read_ == b.query_end_position_in_read_ &&
+               a.target_start_position_in_read_ == b.target_start_position_in_read_ &&
+               a.target_end_position_in_read_ == b.target_end_position_in_read_;
+    };
     const auto num_overlaps = get_size(overlaps);
     bool in_fuse            = false;
     int fused_target_start;
@@ -143,7 +154,8 @@ void Overlapper::post_process_overlaps(std::vector<Overlap>& overlaps, const boo
     int num_residues = 0;
     Overlap prev_overlap;
     std::vector<bool> drop_overlap_mask;
-    if (drop_fused_overlaps)
+    //if (drop_fused_overlaps)
+    if (true)
     {
         drop_overlap_mask.resize(overlaps.size());
     }
@@ -152,8 +164,12 @@ void Overlapper::post_process_overlaps(std::vector<Overlap>& overlaps, const boo
     {
         prev_overlap                  = overlaps[i - 1];
         const Overlap current_overlap = overlaps[i];
+        if (overlaps_equal(prev_overlap, current_overlap))
+        {
+            drop_overlap_mask[i - 1] = true;
+        }
         //Check if previous overlap can be merged into the current one
-        if (overlaps_mergable(prev_overlap, current_overlap))
+        if (do_fusion && overlaps_mergable(prev_overlap, current_overlap))
         {
             if (drop_fused_overlaps)
             {
@@ -239,6 +255,40 @@ namespace details
 {
 namespace overlapper
 {
+
+void filter_self_mappings(std::vector<Overlap>& overlaps,
+                          const io::FastaParser& query_parser,
+                          const io::FastaParser& target_parser,
+                          const double max_percent_overlap)
+{
+
+    auto remove_self_helper = [&query_parser, &target_parser, &max_percent_overlap](const Overlap& o) {
+        claraparabricks::genomeworks::io::FastaSequence query  = query_parser.get_sequence_by_id(o.query_read_id_);
+        claraparabricks::genomeworks::io::FastaSequence target = target_parser.get_sequence_by_id(o.target_read_id_);
+        if (query.name != target.name)
+            return false;
+        std::size_t read_len        = query.seq.size();
+        std::int32_t overlap_length = abs(o.query_end_position_in_read_ - o.query_start_position_in_read_);
+        double percent_overlap      = static_cast<double>(overlap_length) / static_cast<double>(read_len);
+        return percent_overlap >= max_percent_overlap;
+    };
+
+    overlaps.erase(std::remove_if(begin(overlaps), end(overlaps), remove_self_helper), end(overlaps));
+
+    // for (auto& o : overlaps)
+    // {
+    //     if (o.query_read_id_ == o.target_read_id_)
+    //     {
+    //         std::size_t read_len        = query_parser.get_sequence_by_id(o.query_read_id_).seq.size();
+    //         std::int32_t overlap_length = abs(o.query_end_position_in_read_ - o.query_start_position_in_read_);
+    //         double percent_overlap      = static_cast<double>(overlap_length) / static_cast<double>(read_len);
+    //         if (percent_overlap > static_cast<double>(max_percent_overlap))
+    //         {
+    //         }
+    //     }
+    // }
+}
+
 void drop_overlaps_by_mask(std::vector<claraparabricks::genomeworks::cudamapper::Overlap>& overlaps, const std::vector<bool>& mask)
 {
     std::size_t i                                                               = 0;
@@ -375,8 +425,8 @@ void Overlapper::rescue_overlap_ends(std::vector<Overlap>& overlaps,
 std::unique_ptr<Overlapper> Overlapper::create_overlapper(DefaultDeviceAllocator allocator,
                                                           const cudaStream_t cuda_stream)
 {
-    return std::make_unique<OverlapperTriggered>(allocator,
-                                                 cuda_stream);
+    return std::make_unique<OverlapperMinimap>(allocator,
+                                               cuda_stream);
 }
 
 } // namespace cudamapper
