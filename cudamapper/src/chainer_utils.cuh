@@ -38,8 +38,6 @@ namespace cudamapper
 namespace chainerutils
 {
 
-#define MAX_CHAINS_PER_TILE 5
-
 struct QueryTargetPair
 {
     int32_t query_read_id_;
@@ -53,7 +51,6 @@ struct QueryReadID
     __device__ QueryReadID(){};
 };
 
-// takes the anchor and returns the query read id
 struct AnchorToQueryReadIDOp
 {
     __device__ __forceinline__ QueryReadID operator()(const Anchor& a) const
@@ -88,39 +85,22 @@ struct AnchorToQueryTargetPairOp
     }
 };
 
-struct ChainResult
+struct BoolToIntConverter
 {
-    Anchor start;
-    Anchor end;
-    int32_t tile_id;
-    int32_t total_score;
-    int32_t num_anchors;
+    __device__ __forceinline__ int32_t operator()(const bool a) const
+    {
+        return a ? 1 : 0;
+    }
 };
 
-struct TileResults
+struct ChainResult
 {
-    ChainResult results[MAX_CHAINS_PER_TILE];
-    int num_results = 0;
-    bool add_result(const ChainResult& r)
-    {
-        if (num_results < MAX_CHAINS_PER_TILE)
-        {
-            results[num_results] = r;
-            ++num_results;
-            return true;
-        }
-        else
-        {
-            for (int i = 0; i < num_results; ++i)
-            {
-                if (r.total_score > results[i].total_score)
-                {
-                    results[i] = r;
-                }
-            }
-        }
-        return false;
-    }
+    bool is_null               = true;
+    int32_t start_anchor_index = -1;
+    int32_t end_anchor_index   = -1;
+    int32_t tile_id            = -1;
+    int32_t total_score        = 0;
+    int32_t num_anchors        = 0;
 };
 
 __device__ bool
@@ -128,12 +108,11 @@ operator==(const QueryTargetPair& a, const QueryTargetPair& b);
 
 __global__ void convert_offsets_to_ends(std::int32_t* starts, std::int32_t* lengths, std::int32_t* ends, std::int32_t n_starts);
 
-__global__ void calculate_tile_starts(const std::int32_t* query_starts,
-                                      const std::int32_t* tiles_per_query,
+__global__ void calculate_tile_starts(std::int32_t* query_starts,
+                                      std::int32_t* tiles_per_query,
                                       std::int32_t* tile_starts,
                                       const int32_t tile_size,
-                                      int32_t num_queries,
-                                      const std::int32_t* tiles_per_query_up_to_point);
+                                      int32_t num_queries);
 
 void encode_anchor_query_locations(const Anchor* anchors,
                                    int32_t n_anchors,
@@ -161,6 +140,19 @@ void encode_anchor_query_target_pairs(const Anchor* anchors,
                                       DefaultDeviceAllocator& _allocator,
                                       cudaStream_t& _cuda_stream,
                                       int32_t block_size);
+
+int32_t count_unmasked(const bool* mask,
+                       int32_t n_values,
+                       DefaultDeviceAllocator& _allocator,
+                       cudaStream_t& _cuda_stream);
+
+__global__ void chain_anchors_by_backtrace(const Anchor* anchors,
+                                           Overlap* overlaps,
+                                           double* scores,
+                                           bool* max_select_mask,
+                                           int32_t* predecessors,
+                                           const int32_t n_anchors,
+                                           const int32_t min_score);
 
 void encode_overlap_query_target_pairs(Overlap* overlaps,
                                        int32_t n_overlaps,
