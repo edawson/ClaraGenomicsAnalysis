@@ -31,6 +31,41 @@ namespace genomeworks
 namespace cudamapper
 {
 
+TEST(TestCudamapperOverlapperMinimap, Create_Simple_Overlap)
+{
+    Anchor a;
+    a.query_read_id_           = 12;
+    a.query_position_in_read_  = 130;
+    a.target_read_id_          = 46;
+    a.target_position_in_read_ = 10320;
+
+    Anchor b;
+    b.query_read_id_           = 12;
+    b.query_position_in_read_  = 10000;
+    b.target_read_id_          = 46;
+    b.target_position_in_read_ = 20400;
+
+    Overlap p_ab = chainerutils::create_simple_overlap(a, b, 12);
+    ASSERT_EQ(p_ab.query_read_id_, 12);
+    ASSERT_EQ(p_ab.target_read_id_, 46);
+    ASSERT_EQ(p_ab.query_start_position_in_read_, 130);
+    ASSERT_EQ(p_ab.query_end_position_in_read_, 10000);
+    ASSERT_EQ(p_ab.target_start_position_in_read_, 10320);
+    ASSERT_EQ(p_ab.num_residues_, 12);
+    ASSERT_EQ(static_cast<const char>(p_ab.relative_strand), static_cast<const char>(RelativeStrand::Forward));
+
+    Anchor c;
+    c.query_read_id_           = 12;
+    c.query_position_in_read_  = 15000;
+    c.target_read_id_          = 46;
+    c.target_position_in_read_ = 16000;
+
+    Overlap p_bc = chainerutils::create_simple_overlap(b, c, 22);
+    ASSERT_EQ(p_bc.target_start_position_in_read_, 16000);
+    ASSERT_EQ(p_bc.target_end_position_in_read_, 20400);
+    ASSERT_EQ(static_cast<const char>(p_bc.relative_strand), static_cast<const char>(RelativeStrand::Reverse));
+}
+
 TEST(TestCudamapperOverlapperMinimap, Produce_Chains_Small_Chain)
 {
 
@@ -54,7 +89,10 @@ TEST(TestCudamapperOverlapperMinimap, Produce_Chains_Small_Chain)
 
     device_buffer<Overlap> d_overlaps(num_anchors, allocator, cuda_stream.get());
     device_buffer<int32_t> d_predecessors(num_anchors, allocator, cuda_stream.get());
+
     device_buffer<bool> d_mask(num_anchors, allocator, cuda_stream.get());
+    chainerutils::set_mask_values<<<1024, 64, 0, cuda_stream.get()>>>(d_mask.data(), num_anchors, true);
+
     device_buffer<Anchor> d_anchors(num_anchors, allocator, cuda_stream.get());
     device_buffer<double> d_scores(num_anchors, allocator, cuda_stream.get());
 

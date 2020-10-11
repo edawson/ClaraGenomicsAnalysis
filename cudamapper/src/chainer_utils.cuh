@@ -146,6 +146,8 @@ int32_t count_unmasked(const bool* mask,
                        DefaultDeviceAllocator& _allocator,
                        cudaStream_t& _cuda_stream);
 
+__host__ __device__ Overlap create_simple_overlap(const Anchor& start, const Anchor& end, const int32_t num_anchors);
+
 __global__ void chain_anchors_by_backtrace(const Anchor* anchors,
                                            Overlap* overlaps,
                                            double* scores,
@@ -153,6 +155,8 @@ __global__ void chain_anchors_by_backtrace(const Anchor* anchors,
                                            int32_t* predecessors,
                                            const int32_t n_anchors,
                                            const int32_t min_score);
+
+__global__ void set_mask_values(bool* mask, int32_t n_values, const bool value);
 
 void encode_overlap_query_target_pairs(Overlap* overlaps,
                                        int32_t n_overlaps,

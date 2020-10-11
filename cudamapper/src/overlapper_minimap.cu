@@ -168,8 +168,10 @@ __global__ void mask_overlaps(Overlap* overlaps, std::size_t n_overlaps, bool* s
         for (int32_t j = i + 1; j < i + max_reciprocal_iterations; ++j)
         {
 
-            if (percent_reciprocal_overlap(current_overlap, overlaps[j]) > max_percent_reciprocal || contained_overlap(current_overlap, overlaps[j]))
+            if (percent_reciprocal_overlap(current_overlap, overlaps[j]) > max_percent_reciprocal)
                 select_mask[i] = false;
+            if (contained_overlap(current_overlap, overlaps[j]))
+                select_mask[i] = select_mask[i];
         }
     }
 }
@@ -236,7 +238,6 @@ __global__ void initialize_overlaps_array(Overlap* overlaps, const size_t n_over
 }
 
 __global__ void init_overlap_scores(const Overlap* overlaps, double* scores, const int32_t n_overlaps, const double exp)
-
 {
     const std::size_t d_tid = blockIdx.x * blockDim.x + threadIdx.x;
     if (d_tid < n_overlaps)
@@ -252,20 +253,6 @@ __global__ void init_overlap_scores_to_value(double* scores, double val, const i
     {
         scores[d_tid] = 0;
     }
-}
-
-__global__ void init_overlap_mask(bool* mask, const int32_t n_indices, const bool value)
-{
-    const int32_t d_tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (d_tid < n_indices)
-    {
-        mask[d_tid] = value;
-    }
-    const int32_t grid_stride = blockDim.x * gridDim.x;
-    // for (int32_t i = blockIdx.x * blockDim.x + threadIdx.x; i < n_indices; i += blockDim.x * gridDim.x)
-    // {
-    //     mask[i] = value;
-    // }
 }
 
 __global__ void init_predecessor_and_score_arrays(int32_t* predecessors,
@@ -762,9 +749,7 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
     device_buffer<int32_t> d_anchor_predecessors(n_anchors, _allocator, _cuda_stream);
     device_buffer<double> d_anchor_scores(n_anchors, _allocator, _cuda_stream);
 
-    init_overlap_mask<<<(n_anchors / block_size) + 1, block_size, 0, _cuda_stream>>>(d_overlaps_select_mask.data(),
-                                                                                     n_anchors,
-                                                                                     true);
+    chainerutils::set_mask_values<<<BLOCK_COUNT, 64, 0, _cuda_stream>>>(d_overlaps_select_mask.data(), n_anchors, true);
 
     init_overlap_scores_to_value<<<(n_anchors / block_size) + 1, block_size, 0, _cuda_stream>>>(d_anchor_scores.data(), 1.0, n_anchors);
 
@@ -860,7 +845,7 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
                                                         all_to_all,
                                                         false,
                                                         0.8,
-                                                        0);
+                                                        20);
 
     device_buffer<int32_t> d_n_filtered_overlaps(1, _allocator, _cuda_stream);
     drop_overlaps_by_mask(d_overlaps_source,

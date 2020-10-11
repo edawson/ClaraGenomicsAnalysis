@@ -121,7 +121,7 @@ int32_t count_unmasked(const bool* mask,
     return num_unmasked;
 }
 
-__device__ Overlap create_simple_overlap(const Anchor& start, const Anchor& end, const int32_t num_anchors)
+__host__ __device__ Overlap create_simple_overlap(const Anchor& start, const Anchor& end, const int32_t num_anchors)
 {
     Overlap overlap;
     overlap.num_residues_ = num_anchors;
@@ -169,12 +169,13 @@ __global__ void chain_anchors_by_backtrace(const Anchor* anchors,
                                            const int32_t n_anchors,
                                            const int32_t min_score)
 {
-    const std::size_t d_tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (d_tid < n_anchors)
+    const int32_t d_tid       = blockIdx.x * blockDim.x + threadIdx.x;
+    const int32_t grid_stride = blockDim.x * gridDim.x;
+    for (int32_t i = d_tid; i < n_anchors; i += grid_stride)
     {
 
-        int32_t global_overlap_index = d_tid;
-        if (scores[d_tid] >= min_score)
+        int32_t global_overlap_index = i;
+        if (scores[i] >= min_score)
         {
 
             int32_t index                = global_overlap_index;
@@ -206,6 +207,16 @@ __global__ void chain_anchors_by_backtrace(const Anchor* anchors,
         {
             max_select_mask[global_overlap_index] = false;
         }
+    }
+}
+
+__global__ void set_mask_values(bool* mask, int32_t n_values, const bool value)
+{
+    const int32_t d_tid       = blockIdx.x * blockDim.x + threadIdx.x;
+    const int32_t grid_stride = blockDim.x * gridDim.x;
+    for (int32_t i = d_tid; i < n_values; i += grid_stride)
+    {
+        mask[i] = value;
     }
 }
 
