@@ -261,19 +261,21 @@ __global__ void init_overlap_scores(const Overlap* overlaps, double* scores, con
     }
 }
 
-__global__ void init_overlap_scores_to_value(double* scores, double val, const int32_t n_overlaps)
+__global__ void init_overlap_scores_to_value(double* scores, double value, const int32_t n_overlaps)
 {
-    const std::size_t d_tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (d_tid < n_overlaps)
+    int32_t stride = blockDim.x * gridDim.x;
+
+    for (int32_t d_tid = blockIdx.x * blockDim.x + threadIdx.x; d_tid < n_overlaps; d_tid += stride)
     {
-        scores[d_tid] = val;
+        scores[d_tid] = value;
     }
 }
 
-__global__ void init_overlap_mask(bool* mask, const int32_t n_overlaps, const bool value)
+__global__ void init_overlap_mask(bool* mask, const bool value, const int32_t n_overlaps)
 {
-    const std::size_t d_tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (d_tid < n_overlaps)
+    int32_t stride = blockDim.x * gridDim.x;
+
+    for (int32_t d_tid = blockIdx.x * blockDim.x + threadIdx.x; d_tid < n_overlaps; d_tid += stride)
     {
         mask[d_tid] = value;
     }
@@ -282,12 +284,13 @@ __global__ void init_overlap_mask(bool* mask, const int32_t n_overlaps, const bo
 __global__ void init_predecessor_and_score_arrays(int32_t* predecessors,
                                                   double* scores,
                                                   bool* mask, // why is this here??
-                                                  size_t n_overlaps)
+                                                  const int32_t n_overlaps)
 {
-    const std::size_t d_tid = blockIdx.x * blockDim.x + threadIdx.x;
-    if (d_tid < n_overlaps)
+    int32_t stride = blockDim.x * gridDim.x;
+
+    for (int32_t d_tid = blockIdx.x * blockDim.x + threadIdx.x; d_tid < n_overlaps; d_tid += stride)
     {
-        scores[d_tid]       = 0;
+        scores[d_tid] = 0;
         predecessors[d_tid] = -1;
     }
 }
@@ -723,13 +726,13 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
     device_buffer<int32_t> d_anchor_predecessors(n_anchors, _allocator, _cuda_stream);
     device_buffer<double> d_anchor_scores(n_anchors, _allocator, _cuda_stream);
 
-    init_overlap_mask<<<(n_anchors / block_size) + 1, block_size, 0, _cuda_stream>>>(d_overlaps_select_mask.data(),
-                                                                                     n_anchors,
-                                                                                     false);
+    init_overlap_mask<<<BLOCK_COUNT, block_size, 0, _cuda_stream>>>(d_overlaps_select_mask.data(),
+                                                                                     false,
+                                                                                     n_anchors);
 
-    init_overlap_scores_to_value<<<(n_anchors / block_size) + 1, block_size, 0, _cuda_stream>>>(d_anchor_scores.data(), 1.0, n_anchors);
+    init_overlap_scores_to_value<<<BLOCK_COUNT, block_size, 0, _cuda_stream>>>(d_anchor_scores.data(), 1.0, n_anchors);
 
-    init_predecessor_and_score_arrays<<<(n_anchors / block_size) + 1, block_size, 0, _cuda_stream>>>(d_anchor_predecessors.data(),
+    init_predecessor_and_score_arrays<<<BLOCK_COUNT, block_size, 0, _cuda_stream>>>(d_anchor_predecessors.data(),
                                                                                                      d_anchor_scores.data(),
                                                                                                      d_overlaps_select_mask.data(),
                                                                                                      n_anchors);
@@ -860,7 +863,7 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
 
     // why do we run this twice?
     d_overlaps_select_mask.clear_and_resize(n_filtered_overlaps);
-    init_overlap_mask<<<(n_filtered_overlaps / block_size) + 1, block_size, 0, _cuda_stream>>>(d_overlaps_select_mask.data(), n_filtered_overlaps, true);
+    init_overlap_mask<<<BLOCK_COUNT, block_size, 0, _cuda_stream>>>(d_overlaps_select_mask.data(), true, n_filtered_overlaps);
     mask_overlaps<<<(n_anchors / block_size) + 1, block_size, 0, _cuda_stream>>>(d_overlaps_dest.data(),
                                                                                  n_filtered_overlaps,
                                                                                  d_overlaps_select_mask.data(),
