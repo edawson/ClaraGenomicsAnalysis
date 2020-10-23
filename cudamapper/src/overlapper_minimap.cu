@@ -447,6 +447,7 @@ __global__ void chain_anchors_in_block(const Anchor* anchors,
             {
                 __syncthreads();
                 // on the first iteration, every thread looks at the 0th anchor
+                // I think this needs to be renamed to possible_predecessor_anchor
                 const Anchor possible_successor_anchor = block_anchor_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
                 current_score            = block_score_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
                 current_pred             = block_predecessor_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
@@ -489,7 +490,7 @@ __global__ void chain_anchors_in_block(const Anchor* anchors,
                     //current_score                               = current_score + marginal_score;
                     //current_pred                                = tile_start + counter - 1;
                     block_score_cache[thread_id_in_block]       = current_score + marginal_score;
-                    // TODO VI: I'm not entirely sure about this part
+                    // TODO VI: I'm not entirely sure about this part. I think this needs to be refactored to current_pred?
                     block_predecessor_cache[thread_id_in_block] = tile_start + counter; // this expands to tile_starts[batch_block_id] + counter, where counter is 0 -> 1024
                     if (current_score + marginal_score > word_size)
                     {
@@ -517,12 +518,21 @@ __global__ void chain_anchors_in_block(const Anchor* anchors,
 
             }
             __syncthreads();
-            // TODO not sure if this is correct
+            // whatever is left in our cache is the values from the first 64 anchors in the subsequent block
             //if (global_write_index + counter + thread_id_in_block < num_anchors)
             //{
+                // These are wrong because they will all be the same score/pred for _every_ anchor
+                // we have to look into our cache for the values to write back
+                // will remove these later
             //    scores[global_write_index + counter + thread_id_in_block]             = current_score;
             //    predecessors[global_write_index + counter + thread_id_in_block]       = current_pred;
             //    anchor_select_mask[global_write_index + counter + thread_id_in_block] = current_mask;
+                  // These are maybe correct. The 0th index should have the values corresponding to the rightmost anchor
+                  // so circularly shift those before we write back data. We can do cool bit tricks here in case the compiler doesn't
+                  // optimize this
+                  //scores[global_write_index + counter + thread_id_in_block] =  block_score_cache[(thread_id_in_block + 63) % 64];
+                  //predecessors[global_write_index + counter + thread_id_in_block] = block_predecessor_cache[(thread_id_in_block + 63) % 64];
+                  //anchor_select_mask[global_write_index + counter + thread_id_in_block] = block_max_select_mask[(thread_id_in_block + 63) % 64];
             //}
         }
     }
