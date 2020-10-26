@@ -56,6 +56,7 @@ namespace cudamapper
 #define THREADS_PER_BLOCK PREDECESSOR_SEARCH_ITERATIONS
 #define BLOCK_COUNT 1792
 #define BLOCK_SIZE 64
+#define WARP_SIZE 32
 
 #define MAX_CHAINS_PER_TILE 5
 

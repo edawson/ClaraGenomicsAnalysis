@@ -42,6 +42,7 @@ namespace chainerutils
 
 #define BLOCK_COUNT 1792
 #define BLOCK_SIZE 64
+#define WARP_SIZE 32
 
 __device__ bool operator==(const QueryTargetPair& a, const QueryTargetPair& b)
 {
