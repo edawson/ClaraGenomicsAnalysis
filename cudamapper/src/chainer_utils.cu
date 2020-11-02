@@ -512,7 +512,7 @@ void encode_overlap_query_target_pairs(Overlap* overlaps,
     convert_offsets_to_ends<<<(n_query_target_pairs / block_size) + 1, block_size, 0, _cuda_stream>>>(query_target_starts.data(), query_target_lengths.data(), query_target_ends.data(), n_query_target_pairs);
 }
 
-__global__ void initialize_mask(bool* mask, const int32_t n_values, bool val)
+__global__ void initialize_mask(bool* mask, bool val, const int32_t n_values)
 {
     const int32_t d_tid       = blockIdx.x * blockDim.x + threadIdx.x;
     const int32_t grid_stride = blockDim.x * gridDim.x;
@@ -522,7 +522,7 @@ __global__ void initialize_mask(bool* mask, const int32_t n_values, bool val)
     }
 }
 
-__global__ void initialize_array(int32_t* array, const int32_t num_values, int32_t value)
+__global__ void initialize_array(int32_t* array, int32_t value, const int32_t num_values)
 {
     const int32_t d_tid       = blockIdx.x * blockDim.x + threadIdx.x;
     const int32_t grid_stride = blockDim.x * gridDim.x;
@@ -532,7 +532,7 @@ __global__ void initialize_array(int32_t* array, const int32_t num_values, int32
     }
 }
 
-__global__ void initialize_array(double* array, const int32_t num_values, double value)
+__global__ void initialize_array(double* array, double value, const int32_t num_values)
 {
     const int32_t d_tid       = blockIdx.x * blockDim.x + threadIdx.x;
     const int32_t grid_stride = blockDim.x * gridDim.x;

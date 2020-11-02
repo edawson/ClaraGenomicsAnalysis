@@ -175,10 +175,10 @@ void encode_overlap_query_target_pairs(Overlap* overlaps,
                                        cudaStream_t& _cuda_stream,
                                        int32_t block_size);
 
-__global__ void initialize_mask(bool* anchors_mask, const int32_t n_anchors, bool val);
+__global__ void initialize_mask(bool* anchors_mask, bool value, const int32_t n_anchors);
 
-__global__ void initialize_array(int32_t* array, const int32_t num_values, int32_t value);
-__global__ void initialize_array(double* array, const int32_t num_values, double value);
+__global__ void initialize_array(int32_t* array, int32_t value, const int32_t num_values);
+__global__ void initialize_array(double* array, double value, const int32_t num_values);
 
 } // namespace chainerutils
 } // namespace cudamapper
