@@ -31,72 +31,47 @@ def points_equal(fixed, point, slop):
 def within(val, target, tolerance=0.05):
     return abs(float(val) - float(target)) <= tolerance
 
+
+def _swap(val, dest):
+    return dest, val
+
+def reverse_record(record):
+    query_sequence_name, target_sequence_name = _swap(record.query_sequence_name, record.target_sequence_name)
+    query_sequence_length, target_sequence_length = _swap(record.query_sequence_length, record.target_sequence_length)
+    query_start, target_start = _swap(record.query_start, record.target_start)
+    query_end, target_end = _swap(record.query_end, record.target_end)
+
+    return pafio.Overlap(query_sequence_name, query_sequence_length, query_start, query_end, "+" if record.relative_strand == "-" else "+", target_sequence_name, target_sequence_length, target_start, target_end, record.num_residue_matches, record.alignment_block_length, record.mapping_quality, record.tags)
+
+
+
 def calculate_reciprocal_overlap(record, other):
+    if record.query_sequence_name != other.query_sequence_name or \
+        record.target_sequence_name != other.target_sequence_name or \
+        record.relative_strand != other.relative_strand:
+        return 0.0
     q_overlap = min(record.query_end, other.query_end) - max(record.query_start, other.query_start)
-    q_total_len = max(record.query_start, other.query_start) - min(record.query_start, other.query_start)
+    q_total_len = max(record.query_end, other.query_end) - min(record.query_start, other.query_start)
+
+    t_overlap = 0
+    t_total_len = 0
+    if (other.relative_strand == "+"):
+        t_overlap = min(record.target_end, other.target_end) - max(record.target_start, other.target_end)
+        t_total_len = max(record.target_end, other.target_end) - min(record.target_start, other.target_end)
+    else:
+        t_overlap = max(record.target_start, other.target_start) - min(record.target_end, record.target_end)
+        t_total_len = min(record.target_start, other.target_start) - max(record.target_end, other.target_end)
 
     t_overlap = min(record.target_end, other.target_end) - max(record.target_start, other.target_start)
     t_total_len = max(record.target_end, other.target_end) - min(record.target_start, other.target_start)
 
     return float(q_overlap + t_overlap) / float(q_total_len + t_total_len)
 
-
-def _generate_qt_pair_key(record):
-    return "_".join(sorted([record.query_sequence_name, record.target_sequence_name]))
-
-def construct_qt_pair_dict(paf_file):
-    qt_dict = defaultdict(list)
-    score_dict = defaultdict(list)
-
-    for record in pafio.read_paf(paf_file):
-        qt_pair = _generate_qt_pair_key(record)
-        qt_dict[qt_pair].append(record)
-    
-    for q in qt_dict:
-        score_dict[q] = [False for i in qt_dict[q]]
-    return qt_dict, score_dict
-
-def search_record(truth_list, record):
-    for t in range(0, len(truth_list)):
-        vals = records_equal(record, truth_list[t])
-        if vals[0] or vals[1]:
-            return t
-    return None
-
-def search_qt_pair_dict(truth_qt_dict, score_qt_dict, test_record_file, verbose = False):
-
-    false_positives = 0
-    false_negatives = 0
-    true_positives = 0
-    duplicates = 0
-    for rec in pafio.read_paf(test_record_file):
-        qt_key = _generate_qt_pair_key(rec)
-        if qt_key in truth_qt_dict:
-            index = search_record(truth_qt_dict[qt_key], rec)
-            if index is None:
-                false_positives += 1
-                continue
-
-            elif not score_qt_dict[qt_key][index]:
-                score_qt_dict[qt_key][index] = True
-                true_positives += 1
-            else:
-                duplicates += 1
-        else:
-            false_positives += 1
-
-    for qt in score_qt_dict:
-        tp = sum(score_qt_dict[qt])
-        #true_positives += tp
-        false_negatives += len(score_qt_dict[qt]) - tp
-        if verbose:
-            for i in range(0, len(score_qt_dict[qt])):
-                if not score_qt_dict[qt][i]:
-                    print("false_negative:", truth_qt_dict[qt][i])
-
-    return true_positives, false_negatives, false_positives, duplicates
-
 def records_equal(record, other, pos_tolerance=100, min_reciprocity=0.8):
+    if record.query_sequence_name != other.query_sequence_name or \
+        record.target_sequence_name != other.target_sequence_name or \
+        record.relative_strand != other.relative_strand:
+        return False, False, False, False, False, False, False
     query_start_valid = points_equal(record.query_start, other.query_start, pos_tolerance)
     query_end_valid = points_equal(record.query_end, other.query_end, pos_tolerance)
     target_start_valid = points_equal(record.target_start, other.target_start, pos_tolerance)
@@ -110,46 +85,73 @@ def records_equal(record, other, pos_tolerance=100, min_reciprocity=0.8):
 
     return equal, reciprocal, query_start_valid, query_end_valid, target_start_valid, target_end_valid, strands_equal
 
-def match_overlaps(record, other, pos_tolerance, min_reciprocal_overlap):
-    """Given two sets of query and target ranges, check if the query and target ranges
-    fall within a specified tolerance of each other.
+def search_record(truth_list, record, pos_tolerance, min_reciprocal):
+    for t in range(0, len(truth_list)):
+        vals = records_equal(record, truth_list[t], pos_tolerance, min_reciprocal)
+        if vals[0] or vals[1]:
+            return t
+    return None
 
-    Args:
-        query_0 (int, int) : Start/end locations for query_0
-        query_1 (int, int) : Start/end locations of query_1
-        target_0 (int, int): Start/end location of target_0
-        target_1 (int, int): Start/end locations of target_1
+def _generate_qt_pair_key(record):
+    return "_".join(sorted([record.query_sequence_name, record.target_sequence_name]))
 
-    Returns: Boolean indicating query and target match.
-    """
+def construct_query_target_pair_dict(paf_file):
+    qt_dict = defaultdict(list)
+    score_dict = defaultdict(list)
 
-    equal, query_start_valid, query_end_valid, target_start_valid, target_end_valid, strands_equal = records_equal(record, other, pos_tolerance)
-    pct_recip = calculate_reciprocal_overlap(record, other)
-    reciprocal =  pct_recip > min_reciprocal_overlap
+    record_set = set()
+    num_records = 0
+    num_unique = 0
 
-    match = equal or reciprocal
+    for record in pafio.read_paf(paf_file):
+        qt_pair = _generate_qt_pair_key(record)
+        rec_string = "\t".join([str(i) for i in record])
+        if not rec_string in record_set:
+            record_set.add(rec_string) 
+            qt_dict[qt_pair].append(record)
+            num_unique += 1
+        num_records += 1
+    
+    del record_set
+    for q in qt_dict:
+        score_dict[q] = [False for i in qt_dict[q]]
+    return qt_dict, score_dict, num_records, num_unique
 
-    return {"query_start_valid": query_start_valid,
-            "query_end_valid": query_end_valid,
-            "target_start_valid": target_start_valid,
-            "target_end_valid": target_end_valid,
-            "reciprocal_overlaps": reciprocal,
-            "percent_reciprocal": pct_recip,
-            "strands_equal" : strands_equal,
-            "equal" : equal,
-            "match": match}
-    return match
+def search_qt_pair_dict(truth_qt_dict, score_qt_dict, test_record_file, pos_tolerance, min_reciprocal, verbose = False):
 
-def _swap(val, dest):
-    return dest, val
+    false_positives = 0
+    false_negatives = 0
+    true_positives = 0
+    duplicates = 0
+    test_records = 0
+    for rec in pafio.read_paf(test_record_file):
+        test_records += 1
+        qt_key = _generate_qt_pair_key(rec)
+        if qt_key in truth_qt_dict:
+            index = search_record(truth_qt_dict[qt_key], rec, pos_tolerance=pos_tolerance, min_reciprocal=min_reciprocal)
+            if index is None:
+                false_positives += 1
+            elif index is not None and not score_qt_dict[qt_key][index]:
+                score_qt_dict[qt_key][index] = True
+                true_positives += 1
+            else:
+                duplicates += 1
+        else:
+            false_positives += 1
 
-def reverse_record(record):
-    query_sequence_name, target_sequence_name = _swap(record.query_sequence_name, record.target_sequence_name)
-    query_sequence_length, target_sequence_length = _swap(record.query_sequence_length, record.target_sequence_length)
-    query_start, target_start = _swap(record.query_start, record.target_start)
-    query_end, target_end = _swap(record.query_end, record.target_end)
+    for qt in score_qt_dict:
+        false_negatives += sum([1 for i in score_qt_dict[qt] if not i])
+        if verbose:
+            for i in range(0, len(score_qt_dict[qt])):
+                if not score_qt_dict[qt][i]:
+                    print("false_negative:", record_string(truth_qt_dict[qt][i]))
+    return {
+        "test_records" : test_records,
+     "true_positives":true_positives,
+     "false_negatives":false_negatives,
+     "false_positives":false_positives,
+     "duplicates":duplicates}
 
-    return pafio.Overlap(query_sequence_name, query_sequence_length, query_start, query_end, record.relative_strand, target_sequence_name, target_sequence_length, target_start, target_end, record.num_residue_matches, record.alignment_block_length, record.mapping_quality, record.tags)
 
 def evaluate_paf(truth_paf_filepath, test_paf_filepath, pos_tolerance=200, min_reciprocal=0.8, skip_self_mappings=True, verbose=False):
     """Given a truth and test set PAF file, count number of in/incorrectly detected, and non-detected overlaps
@@ -162,23 +164,27 @@ def evaluate_paf(truth_paf_filepath, test_paf_filepath, pos_tolerance=200, min_r
     Returns: 3-tupe consisting of (rue_positive_count, false_positive_count, false_negative_count).
     """
 
-    truth_qt_dict, truth_score_dict = construct_qt_pair_dict(truth_paf_filepath)
+    truth_qt_dict, truth_score_dict, truth_record_count, unique_truth_records = construct_query_target_pair_dict(truth_paf_filepath)
 
 
-    tp, fp, fn, dup = search_qt_pair_dict(truth_qt_dict, truth_score_dict, test_paf_filepath, verbose)
-    prec = tp / (tp + fp)
-    rec = tp / (tp + fn)
+    classifications = search_qt_pair_dict(truth_qt_dict, truth_score_dict, test_paf_filepath, pos_tolerance, min_reciprocal, verbose)
+    prec = classifications["true_positives"] / (classifications["true_positives"] + classifications["false_positives"])
+    rec = classifications["true_positives"] / (classifications["true_positives"] + classifications["false_negatives"])
 
-    print(tp, fp, fn, dup, prec, rec)
     return {
-        "true_positives" : tp,
-        "false_positives" : fp,
-        "false_negatives" : fn,
-        "duplicates" : dup,
+        "truth_record_count" : truth_record_count,
+        "unique_truth_records" : unique_truth_records,
+        "test_records" : classifications["test_records"],
+        "true_positives" : classifications["true_positives"],
+        "false_positives" : classifications["false_positives"],
+        "false_negatives" : classifications["false_negatives"],
+        "duplicates" : classifications["duplicates"],
         "precision" : prec,
         "recall" : rec
     }
 
+def record_string(record):
+    return "\t".join([str(i) for i in record])
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Given a truth (reference) and test set of overlaps in PAF format,\
@@ -204,8 +210,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     results = evaluate_paf(args.truth, args.test, pos_tolerance=args.pos_tolerance, min_reciprocal=args.min_reciprocal, verbose=args.verbose)
-    print("#" + "\t".join(["True_Positives", "False_Positives", "False_Negatives", "Duplicates", "Precision", "Recall"]))
-    print("\t".join([str(i) for i in [results["true_positives"], results["false_positives"], results["false_negatives"], results["duplicates"], results["precision"], results["recall"]]]))
+    print("#" + "\t".join(["Truth_Records", "Unique_Truth_Records", "Test_Records","True_Positives", "False_Positives", "False_Negatives", "Duplicates", "Precision", "Recall"]))
+    print("\t".join([str(i) for i in [results["truth_record_count"], results["unique_truth_records"], results["test_records"], results["true_positives"], results["false_positives"], results["false_negatives"], results["duplicates"], results["precision"], results["recall"]]]))
     # true_positives, false_positives, false_negatives, incorrect_query_start, incorrect_query_end, incorrect_target_start, \
     #     incorrect_target_end, total_test_records = evaluate_paf(args.truth,
     #                                         args.test,
