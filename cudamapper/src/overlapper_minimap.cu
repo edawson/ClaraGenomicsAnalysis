@@ -59,7 +59,7 @@ namespace cudamapper
 
 #define MAX_CHAINS_PER_TILE 5
 
-__device__ bool operator==(const Overlap& a,
+__host__ __device__ __forceinline__ bool operator==(const Overlap& a,
                            const Overlap& b)
 {
     bool same_strand   = a.relative_strand == b.relative_strand;
@@ -76,7 +76,7 @@ __device__ bool operator==(const Overlap& a,
     return identical_ids && same_strand && (gap_match);
 }
 
-__device__ __forceinline__ double
+__host__ __device__ __forceinline__ double
 percent_reciprocal_overlap(const Overlap& a, const Overlap& b)
 {
     if (a.query_read_id_ != b.query_read_id_ || a.target_read_id_ != b.target_read_id_ || a.relative_strand != b.relative_strand)
@@ -108,7 +108,7 @@ percent_reciprocal_overlap(const Overlap& a, const Overlap& b)
 }
 
 // Checks if Overlap a is contained within Overlap b.
-__device__ __forceinline__ bool contained_overlap(const Overlap& a, const Overlap& b)
+__host__ __device__ __forceinline__ bool contained_overlap(const Overlap& a, const Overlap& b)
 {
     if (a.query_read_id_ != b.query_read_id_ || a.target_read_id_ != b.target_read_id_ || a.relative_strand != b.relative_strand)
         return false;
@@ -274,7 +274,7 @@ __global__ void init_predecessor_and_score_arrays(int32_t* predecessors,
     }
 }
 
-__device__ __forceinline__ int32_t fast_approx_log2(const int32_t val)
+__host__ __device__ __forceinline__ int32_t fast_approx_log2(const int32_t val)
 {
     if (val < 2)
         return 0;
@@ -296,7 +296,7 @@ __device__ __forceinline__ int32_t fast_approx_log2(const int32_t val)
         return 8;
 }
 
-__device__ __forceinline__ int32_t log_linear_anchor_weight(const Anchor& a,
+__host__ __device__ __forceinline__ int32_t log_linear_anchor_weight(const Anchor& a,
                                                             const Anchor& b,
                                                             const int32_t word_size,
                                                             const int32_t max_dist,
