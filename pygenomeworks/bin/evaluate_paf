@@ -131,6 +131,8 @@ def search_qt_pair_dict(truth_qt_dict, score_qt_dict, test_record_file, pos_tole
             index = search_record(truth_qt_dict[qt_key], rec, pos_tolerance=pos_tolerance, min_reciprocal=min_reciprocal)
             if index is None:
                 false_positives += 1
+                if (verbose):
+                    print("FP: no_record:", record_string(rec))
             elif index is not None and not score_qt_dict[qt_key][index]:
                 score_qt_dict[qt_key][index] = True
                 true_positives += 1
@@ -138,6 +140,8 @@ def search_qt_pair_dict(truth_qt_dict, score_qt_dict, test_record_file, pos_tole
                 duplicates += 1
         else:
             false_positives += 1
+            if verbose:
+                print("FP: no_key:", record_string(rec))
 
     for qt in score_qt_dict:
         false_negatives += sum([1 for i in score_qt_dict[qt] if not i])
