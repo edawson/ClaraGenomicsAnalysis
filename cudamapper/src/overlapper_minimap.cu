@@ -375,23 +375,22 @@ __global__ void chain_anchors_in_tile(const Anchor* anchors,
         // write is the leftmost index? global_read_index is offset by my thread_id
         // initialize as the 0th anchor in the tile and the "me" anchor
         int32_t global_write_index = tile_start;
-        int32_t global_read_index  = tile_start + thread_id_in_block;
+        // int32_t global_read_index  = tile_start + thread_id_in_block;
         // printf("%d %d %d %d %d\n", block_id, thread_id_in_block, global_write_index, global_read_index, tile_start);
 
         // printf("%d %d %d %d\n", block_id, global_write_index, global_read_index, tile_start);
         if (global_write_index < num_anchors)
         {
             __shared__ Anchor block_anchor_cache[PREDECESSOR_SEARCH_ITERATIONS];
-            __shared__ bool block_max_select_mask[PREDECESSOR_SEARCH_ITERATIONS];
+
             __shared__ int32_t block_score_cache[PREDECESSOR_SEARCH_ITERATIONS];
             __shared__ int32_t block_predecessor_cache[PREDECESSOR_SEARCH_ITERATIONS];
 
             // Initialize the local caches
             // load the current anchor I'm on and it's associated data
-            block_anchor_cache[thread_id_in_block]      = anchors[global_read_index];
-            block_score_cache[thread_id_in_block]       = static_cast<int32_t>(scores[global_read_index]);
-            block_predecessor_cache[thread_id_in_block] = predecessors[global_read_index];
-            block_max_select_mask[thread_id_in_block]   = false;
+            block_anchor_cache[thread_id_in_block]      = anchors[global_write_index + thread_id_in_block];
+            block_score_cache[thread_id_in_block]       = static_cast<int32_t>(scores[global_write_index + thread_id_in_block]);
+            block_predecessor_cache[thread_id_in_block] = predecessors[global_write_index + thread_id_in_block];
 
             // iterate through the tile
             // VI: We do iterate i throughout
@@ -401,25 +400,22 @@ __global__ void chain_anchors_in_tile(const Anchor* anchors,
             int32_t counter = 0;
             int32_t current_score;
             int32_t current_pred;
-            bool current_mask;
             for (; tile_start + counter < query_ends[batch_block_id]; counter++, i++)
             {
                 __syncthreads();
                 // on the first iteration, every thread looks at the 0th anchor
-                const Anchor possible_successor_anchor = block_anchor_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
-                current_score                          = block_score_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
-                current_pred                           = block_predecessor_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
-                current_mask                           = block_max_select_mask[i % PREDECESSOR_SEARCH_ITERATIONS];
+                const Anchor possible_predecessor_anchor = block_anchor_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
+                current_score                            = block_score_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
+                current_pred                             = block_predecessor_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
                 if (current_score <= word_size)
                 {
                     current_score = word_size;
                     current_pred  = -1;
-                    current_mask  = false;
                 }
                 __syncthreads();
 
                 // I think this is the thread at the LHS of the window
-                if ((thread_id_in_block == (i % PREDECESSOR_SEARCH_ITERATIONS)) && (global_read_index + i < num_anchors))
+                if ((thread_id_in_block == (i % PREDECESSOR_SEARCH_ITERATIONS)) && (global_write_index + i < num_anchors))
                 {
                     // Implies that the thread is at the left_side (head, front of FIFO queue) of a window
                     // Read in the anchor, score, and predecessor of the next anchor in memory.
@@ -427,36 +423,33 @@ __global__ void chain_anchors_in_tile(const Anchor* anchors,
                     block_anchor_cache[thread_id_in_block]      = anchors[global_write_index + i];
                     block_score_cache[thread_id_in_block]       = 0;
                     block_predecessor_cache[thread_id_in_block] = -1;
-                    block_max_select_mask[thread_id_in_block]   = false;
                 }
                 else if (thread_id_in_block == (i % PREDECESSOR_SEARCH_ITERATIONS))
                 {
                     block_anchor_cache[thread_id_in_block]      = chainerutils::empty_anchor();
                     block_score_cache[thread_id_in_block]       = 0;
                     block_predecessor_cache[thread_id_in_block] = -1;
-                    block_max_select_mask[thread_id_in_block]   = false;
+                }
+
+                if (possible_predecessor_anchor.query_read_id_ == block_anchor_cache[thread_id_in_block].query_read_id_ && possible_predecessor_anchor.target_read_id_ == block_anchor_cache[thread_id_in_block].target_read_id_)
+                {
+                    assert(possible_predecessor_anchor.query_position_in_read_ < block_anchor_cache[thread_id_in_block].query_position_in_read_);
+                    assert(block_anchor_cache[thread_id_in_block].query_position_in_read_ - possible_predecessor_anchor.query_position_in_read_ < 5000);
                 }
 
                 __syncthreads();
                 // Calculate score order matters here
-                int32_t marginal_score = log_linear_anchor_weight(possible_successor_anchor, block_anchor_cache[thread_id_in_block], word_size, max_distance, max_bandwidth);
+                int32_t marginal_score = log_linear_anchor_weight(possible_predecessor_anchor, block_anchor_cache[thread_id_in_block], word_size, max_distance, max_bandwidth);
 
                 __syncthreads();
 
-                if ((current_score + marginal_score >= block_score_cache[thread_id_in_block]) && (global_read_index + i < num_anchors))
+                if ((current_score + marginal_score >= block_score_cache[thread_id_in_block]) && (global_write_index + i < num_anchors))
                 {
                     //current_score                               = current_score + marginal_score;
                     //current_pred                                = tile_start + counter - 1;
                     block_score_cache[thread_id_in_block] = current_score + marginal_score;
                     // TODO VI: I'm not entirely sure about this part
                     block_predecessor_cache[thread_id_in_block] = tile_start + counter; // this expands to tile_starts[batch_block_id] + counter, where counter is 0 -> 1024
-                    if (current_score + marginal_score > word_size)
-                    {
-                        block_max_select_mask[thread_id_in_block]                = true;
-                        block_max_select_mask[i % PREDECESSOR_SEARCH_ITERATIONS] = false;
-                    }
-
-                    //block_max_select_mask[i % PREDECESSOR_SEARCH_ITERATIONS] = false;
                 }
                 __syncthreads();
 
@@ -467,20 +460,17 @@ __global__ void chain_anchors_in_tile(const Anchor* anchors,
                     // It has therefore completed n = PREDECESSOR_SEARCH_ITERATIONS iterations.
                     // It's final score is known.
                     // Write its score and predecessor to the global_write_index + counter.
-                    scores[global_write_index + counter] = static_cast<double>(current_score);
-                    //predecessors[global_write_index + counter]       = block_predecessor_cache[thread_id_in_block];
+                    scores[global_write_index + counter]       = static_cast<double>(current_score);
                     predecessors[global_write_index + counter] = current_pred;
-                    //anchor_select_mask[global_write_index + counter] = block_max_select_mask[thread_id_in_block];
-                    anchor_select_mask[global_write_index + counter] = current_mask;
                 }
             }
             __syncthreads();
             // TODO not sure if this is correct
             if (global_write_index + counter + thread_id_in_block < num_anchors)
             {
-                scores[global_write_index + counter + thread_id_in_block]             = block_score_cache[thread_id_in_block % i];
-                predecessors[global_write_index + counter + thread_id_in_block]       = block_predecessor_cache[thread_id_in_block % i];
-                anchor_select_mask[global_write_index + counter + thread_id_in_block] = block_max_select_mask[thread_id_in_block];
+                // scores[global_write_index + counter + thread_id_in_block]             = block_score_cache[thread_id_in_block % i];
+                // predecessors[global_write_index + counter + thread_id_in_block]       = block_predecessor_cache[thread_id_in_block % i];
+                // anchor_select_mask[global_write_index + counter + thread_id_in_block] = block_max_select_mask[thread_id_in_block];
                 // scores[global_write_index + counter + thread_id_in_block]             = current_score;
                 // predecessors[global_write_index + counter + thread_id_in_block]       = current_pred;
                 // anchor_select_mask[global_write_index + counter + thread_id_in_block] = current_mask;
@@ -489,168 +479,168 @@ __global__ void chain_anchors_in_tile(const Anchor* anchors,
     }
 }
 
-///
-/// \brief Chains one tile of anchors within a read-tile
-/// TODO VI: I don't know if this is true
-/// This tile may contain anchors from a single read or multiple
-/// reads.
-/// Each block starts within one reads and proceeds tile_size iterations
-/// forward, sliding a window size PREDECESSOR_SEARCH_ITERATIONS along
-/// a tile of TILE_SIZE anchors.
-///
-/// \param anchors
-/// \param scores
-/// \param predecessors
-/// \param anchor_select_mask
-/// \param query_starts
-/// \param query_lengths
-/// \param query_ends
-/// \param tiles_per_query_id
-/// \param num_anchors
-/// \param batch_id
-/// \param batch_size
-/// \param word_size
-/// \param max_distance
-/// \param max_bandwidth
-/// \return __global__
+// ///
+// /// \brief Chains one tile of anchors within a read-tile
+// /// TODO VI: I don't know if this is true
+// /// This tile may contain anchors from a single read or multiple
+// /// reads.
+// /// Each block starts within one reads and proceeds tile_size iterations
+// /// forward, sliding a window size PREDECESSOR_SEARCH_ITERATIONS along
+// /// a tile of TILE_SIZE anchors.
+// ///
+// /// \param anchors
+// /// \param scores
+// /// \param predecessors
+// /// \param anchor_select_mask
+// /// \param query_starts
+// /// \param query_lengths
+// /// \param query_ends
+// /// \param tiles_per_query_id
+// /// \param num_anchors
+// /// \param batch_id
+// /// \param batch_size
+// /// \param word_size
+// /// \param max_distance
+// /// \param max_bandwidth
+// /// \return __global__
 
-// Each block operates on a single tile
-// TODO VI: Do we need to pad the anchors array (with null tiles) so it's tile aligned? We may be missing out on the anchors in the last tile
-__global__ void chain_anchors_in_block(const Anchor* anchors,
-                                       double* scores,
-                                       int32_t* predecessors,
-                                       bool* anchor_select_mask,
-                                       const int32_t* tile_starts,
-                                       const int32_t num_anchors,
-                                       const int32_t num_query_tiles,
-                                       const int32_t batch_id,   // which batch number we are on
-                                       const int32_t batch_size, // fixed to TILE_SIZE...?
-                                       const int32_t word_size,
-                                       const int32_t max_distance,
-                                       const int32_t max_bandwidth)
-{
-    int32_t block_id           = blockIdx.x;  // Each block processes one read-tile of data.
-    int32_t thread_id_in_block = threadIdx.x; // Equivalent to "j." Represents the end of a sliding window.
+// // Each block operates on a single tile
+// // TODO VI: Do we need to pad the anchors array (with null tiles) so it's tile aligned? We may be missing out on the anchors in the last tile
+// __global__ void chain_anchors_in_block(const Anchor* anchors,
+//                                        double* scores,
+//                                        int32_t* predecessors,
+//                                        bool* anchor_select_mask,
+//                                        const int32_t* tile_starts,
+//                                        const int32_t num_anchors,
+//                                        const int32_t num_query_tiles,
+//                                        const int32_t batch_id,   // which batch number we are on
+//                                        const int32_t batch_size, // fixed to TILE_SIZE...?
+//                                        const int32_t word_size,
+//                                        const int32_t max_distance,
+//                                        const int32_t max_bandwidth)
+// {
+//     int32_t block_id           = blockIdx.x;  // Each block processes one read-tile of data.
+//     int32_t thread_id_in_block = threadIdx.x; // Equivalent to "j." Represents the end of a sliding window.
 
-    // figure out which tile I am currently working on
-    int32_t batch_block_id = batch_id * batch_size + block_id;
-    if (batch_block_id < num_query_tiles)
-    {
+//     // figure out which tile I am currently working on
+//     int32_t batch_block_id = batch_id * batch_size + block_id;
+//     if (batch_block_id < num_query_tiles)
+//     {
 
-        // All threads in the block will get the same tile_start number
-        int32_t tile_start = tile_starts[batch_block_id];
+//         // All threads in the block will get the same tile_start number
+//         int32_t tile_start = tile_starts[batch_block_id];
 
-        // write is the leftmost index? global_read_index is offset by my thread_id
-        // initialize as the 0th anchor in the tile and the "me" anchor
-        int32_t global_write_index = tile_start;
-        int32_t global_read_index  = tile_start + thread_id_in_block;
-        if (global_write_index < num_anchors)
-        {
-            __shared__ Anchor block_anchor_cache[PREDECESSOR_SEARCH_ITERATIONS];
-            __shared__ bool block_max_select_mask[PREDECESSOR_SEARCH_ITERATIONS];
-            __shared__ int32_t block_score_cache[PREDECESSOR_SEARCH_ITERATIONS];
-            __shared__ int32_t block_predecessor_cache[PREDECESSOR_SEARCH_ITERATIONS];
+//         // write is the leftmost index? global_read_index is offset by my thread_id
+//         // initialize as the 0th anchor in the tile and the "me" anchor
+//         int32_t global_write_index = tile_start;
+//         int32_t global_read_index  = tile_start + thread_id_in_block;
+//         if (global_write_index < num_anchors)
+//         {
+//             __shared__ Anchor block_anchor_cache[PREDECESSOR_SEARCH_ITERATIONS];
+//             __shared__ bool block_max_select_mask[PREDECESSOR_SEARCH_ITERATIONS];
+//             __shared__ int32_t block_score_cache[PREDECESSOR_SEARCH_ITERATIONS];
+//             __shared__ int32_t block_predecessor_cache[PREDECESSOR_SEARCH_ITERATIONS];
 
-            // Initialize the local caches
-            // load the current anchor I'm on and it's associated data
-            block_anchor_cache[thread_id_in_block]      = anchors[global_read_index];
-            block_score_cache[thread_id_in_block]       = static_cast<int32_t>(scores[global_read_index]);
-            block_predecessor_cache[thread_id_in_block] = predecessors[global_read_index];
-            block_max_select_mask[thread_id_in_block]   = false;
+//             // Initialize the local caches
+//             // load the current anchor I'm on and it's associated data
+//             block_anchor_cache[thread_id_in_block]      = anchors[global_read_index];
+//             block_score_cache[thread_id_in_block]       = static_cast<int32_t>(scores[global_read_index]);
+//             block_predecessor_cache[thread_id_in_block] = predecessors[global_read_index];
+//             block_max_select_mask[thread_id_in_block]   = false;
 
-            // iterate through the tile
-            // VI: We do iterate i throughout
-            // Do we go over to the next tile here...? Is that ok?
-            // Answer to the above is it should be fine (maybe)
-            int32_t i       = PREDECESSOR_SEARCH_ITERATIONS;
-            int32_t counter = 0;
-            int32_t current_score;
-            int32_t current_pred;
-            bool current_mask;
-            for (; counter < batch_size; counter++, i++)
-            {
-                __syncthreads();
-                // on the first iteration, every thread looks at the 0th anchor
-                const Anchor possible_successor_anchor = block_anchor_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
-                current_score                          = block_score_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
-                current_pred                           = block_predecessor_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
-                current_mask                           = block_max_select_mask[i % PREDECESSOR_SEARCH_ITERATIONS];
-                if (current_score <= word_size)
-                {
-                    current_score = word_size;
-                    current_pred  = -1;
-                    current_mask  = false;
-                }
-                __syncthreads();
+//             // iterate through the tile
+//             // VI: We do iterate i throughout
+//             // Do we go over to the next tile here...? Is that ok?
+//             // Answer to the above is it should be fine (maybe)
+//             int32_t i       = PREDECESSOR_SEARCH_ITERATIONS;
+//             int32_t counter = 0;
+//             int32_t current_score;
+//             int32_t current_pred;
+//             bool current_mask;
+//             for (; counter < batch_size; counter++, i++)
+//             {
+//                 __syncthreads();
+//                 // on the first iteration, every thread looks at the 0th anchor
+//                 const Anchor possible_successor_anchor = block_anchor_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
+//                 current_score                          = block_score_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
+//                 current_pred                           = block_predecessor_cache[i % PREDECESSOR_SEARCH_ITERATIONS];
+//                 current_mask                           = block_max_select_mask[i % PREDECESSOR_SEARCH_ITERATIONS];
+//                 if (current_score <= word_size)
+//                 {
+//                     current_score = word_size;
+//                     current_pred  = -1;
+//                     current_mask  = false;
+//                 }
+//                 __syncthreads();
 
-                // I think this is the thread at the LHS of the window
-                if ((thread_id_in_block == (i % PREDECESSOR_SEARCH_ITERATIONS)) && (global_read_index + i < num_anchors))
-                {
-                    // Implies that the thread is at the left_side (head, front of FIFO queue) of a window
-                    // Read in the anchor, score, and predecessor of the next anchor in memory.
-                    // I think we load if we're at the LHS so we want to get the (threadIdx + 64)th anchor
-                    block_anchor_cache[thread_id_in_block]      = anchors[global_write_index + i];
-                    block_score_cache[thread_id_in_block]       = 0;
-                    block_predecessor_cache[thread_id_in_block] = -1;
-                    block_max_select_mask[thread_id_in_block]   = false;
-                }
-                else if (thread_id_in_block == (i % PREDECESSOR_SEARCH_ITERATIONS))
-                {
-                    block_anchor_cache[thread_id_in_block]      = chainerutils::empty_anchor();
-                    block_score_cache[thread_id_in_block]       = 0;
-                    block_predecessor_cache[thread_id_in_block] = -1;
-                    block_max_select_mask[thread_id_in_block]   = false;
-                }
+//                 // I think this is the thread at the LHS of the window
+//                 if ((thread_id_in_block == (i % PREDECESSOR_SEARCH_ITERATIONS)) && (global_read_index + i < num_anchors))
+//                 {
+//                     // Implies that the thread is at the left_side (head, front of FIFO queue) of a window
+//                     // Read in the anchor, score, and predecessor of the next anchor in memory.
+//                     // I think we load if we're at the LHS so we want to get the (threadIdx + 64)th anchor
+//                     block_anchor_cache[thread_id_in_block]      = anchors[global_write_index + i];
+//                     block_score_cache[thread_id_in_block]       = 0;
+//                     block_predecessor_cache[thread_id_in_block] = -1;
+//                     block_max_select_mask[thread_id_in_block]   = false;
+//                 }
+//                 else if (thread_id_in_block == (i % PREDECESSOR_SEARCH_ITERATIONS))
+//                 {
+//                     block_anchor_cache[thread_id_in_block]      = chainerutils::empty_anchor();
+//                     block_score_cache[thread_id_in_block]       = 0;
+//                     block_predecessor_cache[thread_id_in_block] = -1;
+//                     block_max_select_mask[thread_id_in_block]   = false;
+//                 }
 
-                __syncthreads();
-                // Calculate score order matters here
-                int32_t marginal_score = log_linear_anchor_weight(possible_successor_anchor, block_anchor_cache[thread_id_in_block], word_size, max_distance, max_bandwidth);
+//                 __syncthreads();
+//                 // Calculate score order matters here
+//                 int32_t marginal_score = log_linear_anchor_weight(possible_successor_anchor, block_anchor_cache[thread_id_in_block], word_size, max_distance, max_bandwidth);
 
-                __syncthreads();
+//                 __syncthreads();
 
-                if ((current_score + marginal_score >= block_score_cache[thread_id_in_block]) && (global_read_index + i < num_anchors))
-                {
-                    //current_score                               = current_score + marginal_score;
-                    //current_pred                                = tile_start + counter - 1;
-                    block_score_cache[thread_id_in_block] = current_score + marginal_score;
-                    // TODO VI: I'm not entirely sure about this part
-                    block_predecessor_cache[thread_id_in_block] = tile_start + counter; // this expands to tile_starts[batch_block_id] + counter, where counter is 0 -> 1024
-                    if (current_score + marginal_score > word_size)
-                    {
-                        block_max_select_mask[thread_id_in_block]                = true;
-                        block_max_select_mask[i % PREDECESSOR_SEARCH_ITERATIONS] = false;
-                    }
+//                 if ((current_score + marginal_score >= block_score_cache[thread_id_in_block]) && (global_read_index + i < num_anchors))
+//                 {
+//                     //current_score                               = current_score + marginal_score;
+//                     //current_pred                                = tile_start + counter - 1;
+//                     block_score_cache[thread_id_in_block] = current_score + marginal_score;
+//                     // TODO VI: I'm not entirely sure about this part
+//                     block_predecessor_cache[thread_id_in_block] = tile_start + counter; // this expands to tile_starts[batch_block_id] + counter, where counter is 0 -> 1024
+//                     if (current_score + marginal_score > word_size)
+//                     {
+//                         block_max_select_mask[thread_id_in_block] = true;
+//                         current_mask                              = false;
+//                     }
 
-                    //block_max_select_mask[i % PREDECESSOR_SEARCH_ITERATIONS] = false;
-                }
-                __syncthreads();
+//                     //block_max_select_mask[i % PREDECESSOR_SEARCH_ITERATIONS] = false;
+//                 }
+//                 __syncthreads();
 
-                // I'm leftmost thread in teh sliding window, so I write my result out from cache to global array
-                if (thread_id_in_block == counter % PREDECESSOR_SEARCH_ITERATIONS && (global_write_index + counter) < num_anchors)
-                {
-                    // Position thread_id_in_block is at the left-side (tail) of the window.
-                    // It has therefore completed n = PREDECESSOR_SEARCH_ITERATIONS iterations.
-                    // It's final score is known.
-                    // Write its score and predecessor to the global_write_index + counter.
-                    scores[global_write_index + counter] = static_cast<double>(current_score);
-                    //predecessors[global_write_index + counter]       = block_predecessor_cache[thread_id_in_block];
-                    predecessors[global_write_index + counter] = current_pred;
-                    //anchor_select_mask[global_write_index + counter] = block_max_select_mask[thread_id_in_block];
-                    anchor_select_mask[global_write_index + counter] = current_mask;
-                }
-            }
-            __syncthreads();
-            // TODO not sure if this is correct
-            if (global_write_index + counter + thread_id_in_block < num_anchors)
-            {
-                scores[global_write_index + counter + thread_id_in_block]             = current_score;
-                predecessors[global_write_index + counter + thread_id_in_block]       = current_pred;
-                anchor_select_mask[global_write_index + counter + thread_id_in_block] = current_mask;
-            }
-            // printf("%d %d %d %d | %f | %d", );
-        }
-    }
-}
+//                 // I'm leftmost thread in teh sliding window, so I write my result out from cache to global array
+//                 if (thread_id_in_block == counter % PREDECESSOR_SEARCH_ITERATIONS && (global_write_index + counter) < num_anchors)
+//                 {
+//                     // Position thread_id_in_block is at the left-side (tail) of the window.
+//                     // It has therefore completed n = PREDECESSOR_SEARCH_ITERATIONS iterations.
+//                     // It's final score is known.
+//                     // Write its score and predecessor to the global_write_index + counter.
+//                     scores[global_write_index + counter] = static_cast<double>(current_score);
+//                     //predecessors[global_write_index + counter]       = block_predecessor_cache[thread_id_in_block];
+//                     predecessors[global_write_index + counter] = current_pred;
+//                     //anchor_select_mask[global_write_index + counter] = block_max_select_mask[thread_id_in_block];
+//                     anchor_select_mask[global_write_index + counter] = current_mask;
+//                 }
+//             }
+//             __syncthreads();
+//             // TODO not sure if this is correct
+//             if (global_write_index + counter + thread_id_in_block < num_anchors)
+//             {
+//                 scores[global_write_index + counter + thread_id_in_block]             = current_score;
+//                 predecessors[global_write_index + counter + thread_id_in_block]       = current_pred;
+//                 anchor_select_mask[global_write_index + counter + thread_id_in_block] = current_mask;
+//             }
+//             // printf("%d %d %d %d | %f | %d", );
+//         }
+//     }
+// }
 
 __device__ __forceinline__ void add_anchor_to_overlap(const Anchor& anchor, Overlap& overlap)
 {
@@ -849,7 +839,7 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
     device_buffer<int32_t> d_anchor_predecessors(n_anchors, _allocator, _cuda_stream);
     device_buffer<double> d_anchor_scores(n_anchors, _allocator, _cuda_stream);
 
-    chainerutils::initialize_mask<<<BLOCK_COUNT, BLOCK_SIZE, 0, _cuda_stream>>>(d_overlaps_select_mask.data(), n_anchors, true);
+    chainerutils::initialize_mask<<<BLOCK_COUNT, BLOCK_SIZE, 0, _cuda_stream>>>(d_overlaps_select_mask.data(), n_anchors, true); // TODO swap out for thrust::fill
     chainerutils::initialize_array<<<BLOCK_COUNT, BLOCK_SIZE, 0, _cuda_stream>>>(d_anchor_scores.data(), n_anchors, 0.0);
     chainerutils::initialize_array<<<BLOCK_COUNT, BLOCK_SIZE, 0, _cuda_stream>>>(d_anchor_predecessors.data(), n_anchors, -1);
 
@@ -931,7 +921,7 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
                                                                 all_to_all,
                                                                 false,
                                                                 0.9,
-                                                                50,
+                                                                64,
                                                                 n_anchors);
     device_buffer<int32_t> d_n_filtered_overlaps(1, _allocator, _cuda_stream);
     drop_overlaps_by_mask(d_overlaps_source,

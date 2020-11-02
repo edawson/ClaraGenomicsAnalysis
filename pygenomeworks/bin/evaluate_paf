@@ -46,6 +46,82 @@ def calculate_reciprocal_overlap(record, other):
 def _gen_interval(start, end, value, tolerance):
     return intervaltree.Interval(max(0, int(start) - tolerance), end + tolerance, value)
 
+def _gen_qt_pair_key(record):
+    return "_".join(sorted([record.query_sequence_name, record.target_sequence_name]))
+
+def exact_evaluate(truth_paf, test_paf, verbose=False):
+
+    truth_qt_dict, truth_score_dict = construct_qt_pair_dict(truth_paf)
+
+
+    tp, fp, fn, dup = search_qt_pair_dict(truth_qt_dict, truth_score_dict, test_paf, verbose)
+    prec = tp / (tp + fp)
+    rec = tp / (tp + fn)
+
+    print(tp, fp, fn, dup, prec, rec)
+    return {
+        "true_positives" : tp,
+        "false_positives" : fp,
+        "false_negatives" : fn,
+        "duplicates" : dup,
+        "precision" : prec,
+        "recall" : rec
+    }
+
+
+
+def construct_qt_pair_dict(paf_file):
+    qt_dict = defaultdict(list)
+    score_dict = defaultdict(list)
+
+    for record in pafio.read_paf(paf_file):
+        qt_pair = _gen_qt_pair_key(record)
+        qt_dict[qt_pair].append(record)
+    
+    for q in qt_dict:
+        score_dict[q] = [False for i in qt_dict[q]]
+    return qt_dict, score_dict
+
+def search_record(truth_list, record):
+    for t in range(0, len(truth_list)):
+        vals = records_equal(record, truth_list[t])
+        if vals[0] or vals[1]:
+            return t
+    return None
+
+def search_qt_pair_dict(truth_qt_dict, score_qt_dict, test_record_file, verbose = False):
+
+    false_positives = 0
+    false_negatives = 0
+    true_positives = 0
+    duplicates = 0
+    for rec in pafio.read_paf(test_record_file):
+        qt_key = _gen_qt_pair_key(rec)
+        if qt_key in truth_qt_dict:
+            index = search_record(truth_qt_dict[qt_key], rec)
+            if index is None:
+                false_positives += 1
+                continue
+
+            elif not score_qt_dict[qt_key][index]:
+                score_qt_dict[qt_key][index] = True
+                true_positives += 1
+            else:
+                duplicates += 1
+        else:
+            false_positives += 1
+
+    for qt in score_qt_dict:
+        tp = sum(score_qt_dict[qt])
+        #true_positives += tp
+        false_negatives += len(score_qt_dict[qt]) - tp
+        if verbose:
+            for i in range(0, len(score_qt_dict[qt])):
+                if not score_qt_dict[qt][i]:
+                    print("missed:", truth_qt_dict[qt][i])
+
+    return true_positives, false_negatives, false_positives, duplicates
+
 def construct_interval_dictionaries(paf_record_list, tolerance):
     """
     Constructs a dictionary[string->IntervalTree], where the keys of the dictionary are
@@ -64,7 +140,7 @@ def construct_interval_dictionaries(paf_record_list, tolerance):
 
     return query_paf_dict, target_paf_dict
 
-def records_equal(record, other, pos_tolerance):
+def records_equal(record, other, pos_tolerance=100, min_reciprocity=0.8):
     query_start_valid = points_equal(record.query_start, other.query_start, pos_tolerance)
     query_end_valid = points_equal(record.query_end, other.query_end, pos_tolerance)
     target_start_valid = points_equal(record.target_start, other.target_start, pos_tolerance)
@@ -74,7 +150,9 @@ def records_equal(record, other, pos_tolerance):
 
     equal = query_start_valid and target_start_valid and query_end_valid and target_end_valid and strands_equal
 
-    return equal, query_start_valid, query_end_valid, target_start_valid, target_end_valid, strands_equal
+    reciprocal = calculate_reciprocal_overlap(record, other) >= min_reciprocity
+
+    return equal, reciprocal, query_start_valid, query_end_valid, target_start_valid, target_end_valid, strands_equal
 
 def match_overlaps(record, other, pos_tolerance, min_reciprocal_overlap):
     """Given two sets of query and target ranges, check if the query and target ranges
@@ -278,6 +356,8 @@ if __name__ == "__main__":
     parser.add_argument("-i", "--test", dest="test",
                         type=str,
                         default=None, required=True)
+    parser.add_argument("-V", "-verbose", dest="verbose",
+        action="store_true", help="Output information for individual records.")
     parser.add_argument("-s", '--slop', dest="pos_tolerance",
                         type=int,
                         default=200,
@@ -290,22 +370,24 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    true_positives, false_positives, false_negatives, incorrect_query_start, incorrect_query_end, incorrect_target_start, \
-        incorrect_target_end, total_test_records = evaluate_paf(args.truth,
-                                            args.test,
-                                            args.pos_tolerance,
-                                            args.min_reciprocal,
-                                            args.skip_self_mapping)
-    print("Total test records:", total_test_records)
-    print("True positives: ", true_positives)
-    print("False positives: ", false_positives)
-    print("False negatives: ", false_negatives)
-    print("Incorrect query starts:", incorrect_query_start)
-    print("Incorrect target starts:", incorrect_target_start)
-    print("Incorrect query ends:", incorrect_query_end)
-    print("Incorrect target ends:", incorrect_target_end)
+    exact_evaluate(args.truth, args.test, args.verbose)
 
-    precision = true_positives / (true_positives + false_positives)
-    recall = true_positives / (true_positives + false_negatives)
+    # true_positives, false_positives, false_negatives, incorrect_query_start, incorrect_query_end, incorrect_target_start, \
+    #     incorrect_target_end, total_test_records = evaluate_paf(args.truth,
+    #                                         args.test,
+    #                                         args.pos_tolerance,
+    #                                         args.min_reciprocal,
+    #                                         args.skip_self_mapping)
+    # print("Total test records:", total_test_records)
+    # print("True positives: ", true_positives)
+    # print("False positives: ", false_positives)
+    # print("False negatives: ", false_negatives)
+    # print("Incorrect query starts:", incorrect_query_start)
+    # print("Incorrect target starts:", incorrect_target_start)
+    # print("Incorrect query ends:", incorrect_query_end)
+    # print("Incorrect target ends:", incorrect_target_end)
 
-    print("Precision = {}, Recall = {}".format(precision, recall))
+    # precision = true_positives / (true_positives + false_positives)
+    # recall = true_positives / (true_positives + false_negatives)
+
+    # print("Precision = {}, Recall = {}".format(precision, recall))
