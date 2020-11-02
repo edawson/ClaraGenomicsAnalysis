@@ -901,7 +901,7 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
                                                                 all_to_all,
                                                                 false,
                                                                 0.9,
-                                                                10,
+                                                                64,
                                                                 n_anchors);
     device_buffer<int32_t> d_n_filtered_overlaps(1, _allocator, _cuda_stream);
     drop_overlaps_by_mask(d_overlaps_source,
