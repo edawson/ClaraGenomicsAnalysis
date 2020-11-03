@@ -214,24 +214,16 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     results = evaluate_paf(args.truth, args.test, pos_tolerance=args.pos_tolerance, min_reciprocal=args.min_reciprocal, verbose=args.verbose)
-    print("#" + "\t".join(["Truth_Records", "Unique_Truth_Records", "Test_Records","True_Positives", "False_Positives", "False_Negatives", "Duplicates", "Precision", "Recall"]))
-    print("\t".join([str(i) for i in [results["truth_record_count"], results["unique_truth_records"], results["test_records"], results["true_positives"], results["false_positives"], results["false_negatives"], results["duplicates"], results["precision"], results["recall"]]]))
     # true_positives, false_positives, false_negatives, incorrect_query_start, incorrect_query_end, incorrect_target_start, \
     #     incorrect_target_end, total_test_records = evaluate_paf(args.truth,
     #                                         args.test,
     #                                         args.pos_tolerance,
     #                                         args.min_reciprocal,
     #                                         args.skip_self_mapping)
-    # print("Total test records:", total_test_records)
-    # print("True positives: ", true_positives)
-    # print("False positives: ", false_positives)
-    # print("False negatives: ", false_negatives)
-    # print("Incorrect query starts:", incorrect_query_start)
-    # print("Incorrect target starts:", incorrect_target_start)
-    # print("Incorrect query ends:", incorrect_query_end)
-    # print("Incorrect target ends:", incorrect_target_end)
-
-    # precision = true_positives / (true_positives + false_positives)
-    # recall = true_positives / (true_positives + false_negatives)
-
-    # print("Precision = {}, Recall = {}".format(precision, recall))
+    print("Total truth records:", results["truth_record_count"])
+    print("Unique truth records:", results["unique_truth_records"])
+    print("Total test records:", results["test_records"])
+    print("True positives: ", results["true_positives"])
+    print("False positives: ", results["false_positives"])
+    print("False negatives: ", results["false_negatives"])
+    print("Precision = {}, Recall = {}".format(results["precision"], results["recall"]))
