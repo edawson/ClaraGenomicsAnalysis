@@ -54,6 +54,28 @@ __device__ bool operator==(const QueryReadID& a, const QueryReadID& b)
     return a.query_read_id_ == b.query_read_id_;
 }
 
+struct QueryAnchorPos
+{
+    read_id_t query_read_id_;
+    position_in_read_t query_position_in_read_;
+};
+
+struct AnchorToQueryAnchorPos
+{
+    __device__ __forceinline__ QueryAnchorPos operator()(const Anchor& a) const
+    {
+        QueryAnchorPos q;
+        q.query_read_id_          = a.query_read_id_;
+        q.query_position_in_read_ = a.query_position_in_read_;
+        return q;
+    }
+};
+
+__device__ bool operator==(const QueryAnchorPos& a, const QueryAnchorPos& b)
+{
+    return a.query_read_id_ == b.query_read_id_ && a.query_position_in_read_ == b.query_position_in_read_;
+}
+
 __device__ Overlap create_simple_overlap(const Anchor& start, const Anchor& end, const int32_t num_anchors)
 {
     Overlap overlap;
@@ -106,6 +128,213 @@ Overlap create_simple_overlap_cpu(const Anchor& start, const Anchor& end, const 
         overlap.target_end_position_in_read_   = end.target_position_in_read_;
     }
     return overlap;
+}
+
+void drop_overlaps_by_mask(device_buffer<Overlap>& d_overlaps,
+                           device_buffer<bool>& d_mask,
+                           const std::int32_t n_overlaps,
+                           device_buffer<Overlap>& d_dest,
+                           device_buffer<int32_t>& d_filtered_count,
+                           DefaultDeviceAllocator& allocator,
+                           cudaStream_t& cuda_stream)
+{
+    device_buffer<char> d_temp_buf(allocator, cuda_stream);
+    void* d_temp_storage           = nullptr;
+    std::size_t temp_storage_bytes = 0;
+    cub::DeviceSelect::Flagged(d_temp_storage, temp_storage_bytes, d_overlaps.data(),
+                               d_mask.data(),
+                               d_dest.data(),
+                               d_filtered_count.data(),
+                               n_overlaps,
+                               cuda_stream);
+    d_temp_buf.clear_and_resize(temp_storage_bytes);
+    d_temp_storage = d_temp_buf.data();
+    cub::DeviceSelect::Flagged(d_temp_storage, temp_storage_bytes, d_overlaps.data(),
+                               d_mask.data(),
+                               d_dest.data(),
+                               d_filtered_count.data(),
+                               n_overlaps,
+                               cuda_stream);
+    int32_t n_filtered = cudautils::get_value_from_device(d_filtered_count.data(), cuda_stream);
+    d_mask.clear_and_resize(n_filtered);
+    chainerutils::initialize_mask<<<BLOCK_COUNT, BLOCK_SIZE, 0, cuda_stream>>>(d_mask.data(), true, n_filtered);
+}
+
+__global__ void mask_repeat_runs(const int32_t* const masked_run_starts,
+                                 const int32_t* const masked_run_lengths,
+                                 bool* mask,
+                                 const int32_t max_chain_length,
+                                 const int64_t num_chains)
+{
+    const std::size_t thread_id = blockIdx.x * blockDim.x + threadIdx.x;
+    const int32_t stride        = blockDim.x * gridDim.x;
+    for (int i = thread_id; i < num_chains; i += stride)
+    {
+        int32_t chain_length = masked_run_lengths[i];
+        int32_t chain_start  = masked_run_starts[i];
+        const bool mask_val  = chain_length <= max_chain_length;
+        for (int32_t anchor_index = chain_start; anchor_index < chain_start + chain_length; ++anchor_index)
+        {
+            mask[anchor_index] = mask_val;
+        }
+    }
+}
+
+device_buffer<Anchor> mask_repeated_anchors(const device_buffer<Anchor>& anchors,
+                                            const int32_t max_run_length,
+                                            DefaultDeviceAllocator& allocator,
+                                            cudaStream_t& cuda_stream)
+{
+
+    device_buffer<QueryAnchorPos> qpos_runs(anchors.size(), allocator, cuda_stream);
+    device_buffer<int32_t> qpos_run_lengths(anchors.size(), allocator, cuda_stream);
+
+    device_buffer<int32_t> num_qpos_runs_d(1, allocator, cuda_stream);
+
+    void* temp_storage_d           = nullptr;
+    std::size_t temp_storage_bytes = 0;
+
+    AnchorToQueryAnchorPos anchor_to_pos_op;
+    cub::TransformInputIterator<QueryAnchorPos, AnchorToQueryAnchorPos, const Anchor*> query_positions_d(anchors.data(), anchor_to_pos_op);
+
+    // Run length encode the query positions of each anchor.
+    // Repeats appear as runs of identical query positions
+    cub::DeviceRunLengthEncode::Encode(temp_storage_d,
+                                       temp_storage_bytes,
+                                       query_positions_d,
+                                       qpos_runs.data(),
+                                       qpos_run_lengths.data(),
+                                       num_qpos_runs_d.data(),
+                                       anchors.size(),
+                                       cuda_stream);
+    device_buffer<char> temp_buf_d(temp_storage_bytes, allocator, cuda_stream);
+    temp_storage_d = temp_buf_d.data();
+    cub::DeviceRunLengthEncode::Encode(temp_storage_d,
+                                       temp_storage_bytes,
+                                       query_positions_d,
+                                       qpos_runs.data(),
+                                       qpos_run_lengths.data(),
+                                       num_qpos_runs_d.data(),
+                                       anchors.size(),
+                                       cuda_stream);
+
+    // Total number of query-pos struct runs.
+    int32_t num_query_pos_runs = cudautils::get_value_from_device(num_qpos_runs_d.data(), cuda_stream);
+
+    auto thrust_exec_policy = thrust::cuda::par(allocator).on(cuda_stream);
+    device_buffer<int32_t> qpos_run_starts(num_query_pos_runs, allocator, cuda_stream);
+
+    // Run an exclusive prefix sum to calculate the starts of each
+    // query-position run in the anchors array.
+    thrust::exclusive_scan(thrust_exec_policy,
+                           qpos_run_lengths.begin(),
+                           qpos_run_lengths.end(),
+                           qpos_run_starts.begin());
+
+    device_buffer<bool> mask(num_query_pos_runs, allocator, cuda_stream);
+    initialize_mask<<<BLOCK_COUNT, BLOCK_SIZE, 0, cuda_stream>>>(mask.data(), true, anchors.size());
+
+    // could be replaced by a thrust::copy_if,
+    // but not sure how to use a predicate with an argument from a second array.
+    // We also need to trim both the start and length arrays.
+    mask_repeat_runs<<<BLOCK_COUNT, BLOCK_SIZE, 0, cuda_stream>>>(qpos_run_starts.data(),
+                                                                  qpos_run_lengths.data(),
+                                                                  mask.data(),
+                                                                  max_run_length,
+                                                                  num_query_pos_runs);
+
+    device_buffer<int32_t> num_runs_to_filter_d(1, allocator, cuda_stream);
+    device_buffer<int32_t> filtered_lengths_d(num_query_pos_runs, allocator, cuda_stream);
+    device_buffer<int32_t> filtered_starts_d(num_query_pos_runs, allocator, cuda_stream);
+
+    // Filter the lengths array to only contain values from anchor runs that are above the length threshold to be considered a repeat.
+    // temp_storage_d     = nullptr;
+    // temp_storage_bytes = 0;
+    // cub::DeviceSelect::Flagged(temp_storage_d,
+    //                            temp_storage_bytes,
+    //                            lengths.data(),
+    //                            mask.data(),
+    //                            filtered_lengths_d.data(),
+    //                            num_runs_to_filter_d.data(),
+    //                            num_query_pos_runs,
+    //                            cuda_stream);
+    // temp_buf_d.clear_and_resize(temp_storage_bytes);
+    // temp_storage_d = temp_buf_d.data();
+    // cub::DeviceSelect::Flagged(temp_storage_d,
+    //                            temp_storage_bytes,
+    //                            lengths.data(),
+    //                            mask.data(),
+    //                            filtered_lengths_d.data(),
+    //                            num_runs_to_filter_d.data(),
+    //                            num_query_pos_runs,
+    //                            cuda_stream);
+
+    // // Filter the starts array.
+    // temp_storage_d     = nullptr;
+    // temp_storage_bytes = 0;
+    // cub::DeviceSelect::Flagged(temp_storage_d,
+    //                            temp_storage_bytes,
+    //                            run_starts.data(),
+    //                            mask.data(),
+    //                            filtered_starts_d.data(),
+    //                            num_runs_to_filter_d.data(),
+    //                            num_query_pos_runs,
+    //                            cuda_stream);
+    // temp_buf_d.clear_and_resize(temp_storage_bytes);
+    // temp_storage_d = temp_buf_d.data();
+    // cub::DeviceSelect::Flagged(temp_storage_d,
+    //                            temp_storage_bytes,
+    //                            run_starts.data(),
+    //                            mask.data(),
+    //                            filtered_starts_d.data(),
+    //                            num_runs_to_filter_d.data(),
+    //                            num_query_pos_runs,
+    //                            cuda_stream);
+
+    // int32_t num_chains_to_keep = cudautils::get_value_from_device(num_runs_to_filter_d.data(), cuda_stream);
+
+    // std::cerr << "Filtering " << (num_query_pos_runs - num_chains_to_keep) << " repeat-associated chains of anchors." << std::endl;
+
+    // mask.clear_and_resize(anchors.size());
+    // initialize_mask<<<BLOCK_COUNT, BLOCK_SIZE, 0, cuda_stream>>>(mask.data(), false, anchors.size());
+
+    // select_mask_anchors_in_runs<<<BLOCK_COUNT, BLOCK_SIZE, 0, cuda_stream>>>(mask.data(),
+    //                                                                          filtered_starts_d.data(),
+    //                                                                          filtered_lengths_d.data(),
+    //                                                                          num_chains_to_keep);
+
+    // // We need to calculate the total number of filtered anchors
+    // int64_t num_filtered_anchors = thrust::reduce(thrust_exec_policy,
+    //                                               filtered_lengths_d.begin(),
+    //                                               filtered_lengths_d.end(),
+    //                                               0);
+
+    device_buffer<Anchor> filtered_anchors(1, allocator, cuda_stream);
+    // device_buffer<int64_t> num_filtered_anchors_d(1, allocator, cuda_stream);
+
+    // // Drop anchors that have been masked because they are considered part of a repeat run.
+    // temp_storage_d     = nullptr;
+    // temp_storage_bytes = 0;
+    // cub::DeviceSelect::Flagged(temp_storage_d,
+    //                            temp_storage_bytes,
+    //                            anchors.data(),
+    //                            mask.data(),
+    //                            filtered_anchors.data(),
+    //                            num_filtered_anchors_d.data(),
+    //                            anchors.size(),
+    //                            cuda_stream);
+    // temp_buf_d.clear_and_resize(temp_storage_bytes);
+    // temp_storage_d = temp_buf_d.data();
+    // cub::DeviceSelect::Flagged(temp_storage_d,
+    //                            temp_storage_bytes,
+    //                            anchors.data(),
+    //                            mask.data(),
+    //                            filtered_anchors.data(),
+    //                            num_filtered_anchors_d.data(),
+    //                            anchors.size(),
+    //                            cuda_stream);
+
+    return filtered_anchors;
 }
 
 // TODO VI: this may have some thread overwrite issues, as well as some problems
@@ -278,8 +507,7 @@ __global__ void calculate_tile_starts(const std::int32_t* query_starts,
     }
 }
 
-void encode_query_locations_from_anchors(const Anchor* anchors,
-                                         int32_t n_anchors,
+void encode_query_locations_from_anchors(device_buffer<Anchor>& anchors,
                                          device_buffer<int32_t>& query_starts,
                                          device_buffer<int32_t>& query_lengths,
                                          device_buffer<int32_t>& query_ends,
@@ -289,16 +517,15 @@ void encode_query_locations_from_anchors(const Anchor* anchors,
 {
     AnchorToQueryReadIDOp anchor_to_read_op;
     // This takes anchors and outputs and converts the anchors to QueryReadID types (references)
-    cub::TransformInputIterator<QueryReadID, AnchorToQueryReadIDOp, const Anchor*> d_queries(anchors, anchor_to_read_op);
+    cub::TransformInputIterator<QueryReadID, AnchorToQueryReadIDOp, const Anchor*> d_queries(anchors.data(), anchor_to_read_op);
     // create buffer of size number of anchors
-    device_buffer<QueryReadID> d_query_read_ids(n_anchors, _allocator, _cuda_stream);
+    device_buffer<QueryReadID> d_query_read_ids(anchors.size(), _allocator, _cuda_stream);
     // vector of number of read ids...? I don't know what this is for
     // This is used to store the length of the encoded sequence
     device_buffer<int32_t> d_num_query_read_ids(1, _allocator, _cuda_stream);
 
     // don't know what this is for yet
     // this is for internal use for run length encoding
-    device_buffer<char> d_temp_buf(_allocator, _cuda_stream);
     void* d_temp_storage           = nullptr;
     std::size_t temp_storage_bytes = 0;
 
@@ -308,10 +535,9 @@ void encode_query_locations_from_anchors(const Anchor* anchors,
                                        d_query_read_ids.data(),
                                        query_lengths.data(),
                                        d_num_query_read_ids.data(),
-                                       n_anchors,
+                                       anchors.size(),
                                        _cuda_stream);
-
-    d_temp_buf.clear_and_resize(temp_storage_bytes);
+    device_buffer<char> d_temp_buf(temp_storage_bytes, _allocator, _cuda_stream);
     d_temp_storage = d_temp_buf.data();
 
     cub::DeviceRunLengthEncode::Encode(d_temp_storage,
@@ -320,13 +546,13 @@ void encode_query_locations_from_anchors(const Anchor* anchors,
                                        d_query_read_ids.data(),
                                        query_lengths.data(), // this is the vector of encoded lengths
                                        d_num_query_read_ids.data(),
-                                       n_anchors,
+                                       anchors.size(),
                                        _cuda_stream);
     // this is just the "length" of the encoded sequence
-    n_queries          = cudautils::get_value_from_device(d_num_query_read_ids.data(), _cuda_stream);
+    n_queries = cudautils::get_value_from_device(d_num_query_read_ids.data(), _cuda_stream);
+
     d_temp_storage     = nullptr;
     temp_storage_bytes = 0;
-
     cub::DeviceScan::ExclusiveSum(d_temp_storage,
                                   temp_storage_bytes,
                                   query_lengths.data(), // this is the vector of encoded lengths

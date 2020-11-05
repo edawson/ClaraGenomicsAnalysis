@@ -772,36 +772,6 @@ void drop_scores_by_mask(device_buffer<double>& d_scores,
                                _cuda_stream);
 }
 
-void drop_overlaps_by_mask(device_buffer<Overlap>& d_overlaps,
-                           device_buffer<bool>& d_mask,
-                           const std::int32_t n_overlaps,
-                           device_buffer<Overlap>& d_dest,
-                           device_buffer<int32_t>& d_filtered_count,
-                           DefaultDeviceAllocator& _allocator,
-                           cudaStream_t& _cuda_stream)
-{
-    device_buffer<char> d_temp_buf(_allocator, _cuda_stream);
-    void* d_temp_storage           = nullptr;
-    std::size_t temp_storage_bytes = 0;
-    cub::DeviceSelect::Flagged(d_temp_storage, temp_storage_bytes, d_overlaps.data(),
-                               d_mask.data(),
-                               d_dest.data(),
-                               d_filtered_count.data(),
-                               n_overlaps,
-                               _cuda_stream);
-    d_temp_buf.clear_and_resize(temp_storage_bytes);
-    d_temp_storage = d_temp_buf.data();
-    cub::DeviceSelect::Flagged(d_temp_storage, temp_storage_bytes, d_overlaps.data(),
-                               d_mask.data(),
-                               d_dest.data(),
-                               d_filtered_count.data(),
-                               n_overlaps,
-                               _cuda_stream);
-    int32_t n_filtered = cudautils::get_value_from_device(d_filtered_count.data(), _cuda_stream);
-    d_mask.clear_and_resize(n_filtered);
-    chainerutils::initialize_mask<<<BLOCK_COUNT, BLOCK_SIZE, 0, _cuda_stream>>>(d_mask.data(), true, n_filtered);
-}
-
 void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
                                      const device_buffer<Anchor>& d_anchors,
                                      bool all_to_all,
@@ -810,7 +780,12 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
                                      int64_t min_bases_per_residue,
                                      float min_overlap_fraction)
 {
-    const int32_t n_anchors = d_anchors.size();
+
+    std::cerr << "Initial anchor count: " << d_anchors.size() << std::endl;
+    device_buffer<Anchor> filtered_anchors_d = chainerutils::mask_repeated_anchors(d_anchors, 10, _allocator, _cuda_stream);
+    const int32_t n_anchors                  = filtered_anchors_d.size();
+
+    assert(filtered_anchors_d.size() <= d_anchors.size());
 
     device_buffer<bool> d_overlaps_select_mask(n_anchors, _allocator, _cuda_stream);
     device_buffer<Overlap> d_overlaps_source(n_anchors, _allocator, _cuda_stream);
@@ -832,8 +807,7 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
     int32_t n_queries;
 
     // generates the scheduler blocks
-    chainerutils::encode_query_locations_from_anchors(d_anchors.data(),
-                                                      n_anchors,
+    chainerutils::encode_query_locations_from_anchors(filtered_anchors_d,
                                                       query_id_starts,
                                                       query_id_lengths,
                                                       query_id_ends,
@@ -849,7 +823,7 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
         std::cerr << "Processing batch " << batch << " of " << num_batches << ". Total queries: " << n_queries << "." << std::endl;
         // Launch one 1792 blocks (from paper), with 64 threads
         // each batch is of size BLOCK_COUNT
-        chain_anchors_naively<<<BLOCK_COUNT, PREDECESSOR_SEARCH_ITERATIONS, 0, _cuda_stream>>>(d_anchors.data(),
+        chain_anchors_naively<<<BLOCK_COUNT, PREDECESSOR_SEARCH_ITERATIONS, 0, _cuda_stream>>>(filtered_anchors_d.data(),
                                                                                                d_anchor_scores.data(),
                                                                                                d_anchor_predecessors.data(),
                                                                                                d_overlaps_select_mask.data(),
@@ -858,7 +832,7 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
                                                                                                batch,
                                                                                                n_anchors,
                                                                                                n_queries,
-                                                                                               15,
+                                                                                               25,
                                                                                                5000,
                                                                                                500);
     }
@@ -884,7 +858,7 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
 #endif
 
     // the deschedule block. Get outputs from here
-    chainerutils::backtrace_anchors_to_overlaps<<<BLOCK_COUNT, BLOCK_SIZE, 0, _cuda_stream>>>(d_anchors.data(),
+    chainerutils::backtrace_anchors_to_overlaps<<<BLOCK_COUNT, BLOCK_SIZE, 0, _cuda_stream>>>(filtered_anchors_d.data(),
                                                                                               d_overlaps_source.data(),
                                                                                               d_anchor_scores.data(),
                                                                                               d_overlaps_select_mask.data(),
@@ -904,13 +878,13 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
                                                                 64,
                                                                 n_anchors);
     device_buffer<int32_t> d_n_filtered_overlaps(1, _allocator, _cuda_stream);
-    drop_overlaps_by_mask(d_overlaps_source,
-                          d_overlaps_select_mask,
-                          n_anchors,
-                          d_overlaps_dest,
-                          d_n_filtered_overlaps,
-                          _allocator,
-                          _cuda_stream);
+    chainerutils::drop_overlaps_by_mask(d_overlaps_source,
+                                        d_overlaps_select_mask,
+                                        n_anchors,
+                                        d_overlaps_dest,
+                                        d_n_filtered_overlaps,
+                                        _allocator,
+                                        _cuda_stream);
     int32_t n_filtered_overlaps = cudautils::get_value_from_device(d_n_filtered_overlaps.data(), _cuda_stream);
     std::cerr << "Number of filtered chains: " << n_filtered_overlaps << std::endl;
 
