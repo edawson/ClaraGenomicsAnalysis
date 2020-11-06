@@ -782,10 +782,20 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
 {
 
     std::cerr << "Initial anchor count: " << d_anchors.size() << std::endl;
-    device_buffer<Anchor> filtered_anchors_d = chainerutils::mask_repeated_anchors(d_anchors, 10, _allocator, _cuda_stream);
-    const int32_t n_anchors                  = filtered_anchors_d.size();
+    int64_t number_filtered_anchors;
+    device_buffer<Anchor> filtered_anchors_d = chainerutils::mask_repeated_anchors(d_anchors, 20, number_filtered_anchors, _allocator, _cuda_stream);
+    const int32_t n_anchors                  = number_filtered_anchors;
 
-    assert(filtered_anchors_d.size() <= d_anchors.size());
+#define DEBUG_ANCHORS
+#ifdef DEBUG_ANCHORS
+    std::vector<Anchor> anchors_h;
+    anchors_h.resize(d_anchors.size());
+
+#endif
+
+    assert(number_filtered_anchors <= d_anchors.size());
+
+    std::cerr << "Number of filtered anchors: " << number_filtered_anchors << std::endl;
 
     device_buffer<bool> d_overlaps_select_mask(n_anchors, _allocator, _cuda_stream);
     device_buffer<Overlap> d_overlaps_source(n_anchors, _allocator, _cuda_stream);
@@ -811,6 +821,7 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
                                                       query_id_starts,
                                                       query_id_lengths,
                                                       query_id_ends,
+                                                      n_anchors,
                                                       n_queries,
                                                       _allocator,
                                                       _cuda_stream); // This is threads per block
@@ -832,7 +843,7 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
                                                                                                batch,
                                                                                                n_anchors,
                                                                                                n_queries,
-                                                                                               25,
+                                                                                               15,
                                                                                                5000,
                                                                                                500);
     }

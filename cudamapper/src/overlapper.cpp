@@ -137,7 +137,7 @@ namespace cudamapper
 void Overlapper::post_process_overlaps(std::vector<Overlap>& overlaps, const bool drop_fused_overlaps)
 {
 
-    const bool do_fusion    = false;
+    const bool do_fusion    = true;
     const auto num_overlaps = get_size(overlaps);
     bool in_fuse            = false;
     int fused_target_start;

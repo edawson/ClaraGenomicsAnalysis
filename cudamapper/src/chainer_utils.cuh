@@ -136,6 +136,7 @@ void encode_query_locations_from_anchors(device_buffer<Anchor>& anchors,
                                          device_buffer<int32_t>& query_starts,
                                          device_buffer<int32_t>& query_lengths,
                                          device_buffer<int32_t>& query_ends,
+                                         const int64_t n_anchors,
                                          int32_t& n_queries,
                                          DefaultDeviceAllocator& _allocator,
                                          cudaStream_t& _cuda_stream);
@@ -150,6 +151,7 @@ void drop_overlaps_by_mask(device_buffer<Overlap>& d_overlaps,
 
 device_buffer<Anchor> mask_repeated_anchors(const device_buffer<Anchor>& anchors,
                                             const int32_t max_run_length,
+                                            int64_t& num_filtered_anchors,
                                             DefaultDeviceAllocator& allocator,
                                             cudaStream_t& cuda_stream);
 
