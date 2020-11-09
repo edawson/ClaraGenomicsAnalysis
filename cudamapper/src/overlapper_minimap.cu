@@ -59,7 +59,9 @@ namespace cudamapper
 
 #define MAX_CHAINS_PER_TILE 5
 
-__device__ bool operator==(const Overlap& a,
+#define RUN_CPU
+
+__host__ __device__ __forceinline__ bool operator==(const Overlap& a,
                            const Overlap& b)
 {
     bool same_strand   = a.relative_strand == b.relative_strand;
@@ -76,7 +78,7 @@ __device__ bool operator==(const Overlap& a,
     return identical_ids && same_strand && (gap_match);
 }
 
-__device__ __forceinline__ double
+__host__ __device__ __forceinline__ double
 percent_reciprocal_overlap(const Overlap& a, const Overlap& b)
 {
     if (a.query_read_id_ != b.query_read_id_ || a.target_read_id_ != b.target_read_id_ || a.relative_strand != b.relative_strand)
@@ -108,7 +110,7 @@ percent_reciprocal_overlap(const Overlap& a, const Overlap& b)
 }
 
 // Checks if Overlap a is contained within Overlap b.
-__device__ __forceinline__ bool contained_overlap(const Overlap& a, const Overlap& b)
+__host__ __device__ __forceinline__ bool contained_overlap(const Overlap& a, const Overlap& b)
 {
     if (a.query_read_id_ != b.query_read_id_ || a.target_read_id_ != b.target_read_id_ || a.relative_strand != b.relative_strand)
         return false;
@@ -274,7 +276,7 @@ __global__ void init_predecessor_and_score_arrays(int32_t* predecessors,
     }
 }
 
-__device__ __forceinline__ int32_t fast_approx_log2(const int32_t val)
+__host__ __device__ __forceinline__ int32_t fast_approx_log2(const int32_t val)
 {
     if (val < 2)
         return 0;
@@ -296,7 +298,7 @@ __device__ __forceinline__ int32_t fast_approx_log2(const int32_t val)
         return 8;
 }
 
-__device__ __forceinline__ int32_t log_linear_anchor_weight(const Anchor& a,
+__host__ __device__ __forceinline__ int32_t log_linear_anchor_weight(const Anchor& a,
                                                             const Anchor& b,
                                                             const int32_t word_size,
                                                             const int32_t max_dist,
@@ -309,7 +311,7 @@ __device__ __forceinline__ int32_t log_linear_anchor_weight(const Anchor& a,
 
     int32_t b_query_pos  = b.query_position_in_read_ + word_size;
     int32_t b_target_pos = static_cast<int32_t>(b.target_position_in_read_);
-    if (b_target_pos < a.target_position_in_read_)
+    if (b_target_pos < static_cast<int32_t>(a.target_position_in_read_))
     {
         b_target_pos -= word_size;
     }
@@ -488,6 +490,56 @@ __global__ void chain_anchors_in_tile(const Anchor* anchors,
     }
 }
 
+void chain_anchors_in_block_cpu(std::vector<Anchor>& anchors,
+                                std::vector<double>& scores,
+                                std::vector<int32_t>& predecessors,
+                                const int32_t num_anchors)
+{
+    const int32_t window_size = 257;
+    const int32_t word_size = 30;
+    const int32_t max_distance = 5000;
+    const int32_t max_bandwidth = 500;
+    // init array with size of sliding window
+    std::vector<int32_t> score_cache(window_size, 0);
+    std::vector<int32_t> predecessor_cache(window_size, -1);
+
+
+    for (int32_t i = 0; i < num_anchors; i++)
+    {
+        const Anchor current_anchor = anchors[i];
+
+        int32_t current_score = score_cache[i % window_size];
+        int32_t current_pred  = predecessor_cache[i % window_size];
+
+        if (current_score <= word_size)
+        {
+            current_score = word_size;
+            current_pred  = -1;
+        }
+
+        scores[i] = static_cast<double>(current_score);
+        predecessors[i] = current_pred;
+
+        // inner loop of the algorithm that runs for i to i + N, N = window_size
+        for (int32_t j = i + 1, row = 1; (j < num_anchors) && (row < window_size); j++, row++)
+        {
+            Anchor successor = anchors[j];
+
+            int32_t marginal_score = log_linear_anchor_weight(current_anchor, successor, word_size, max_distance, max_bandwidth);
+
+            if (current_score + marginal_score >= score_cache[j % window_size])
+            {
+                score_cache[j % window_size] = current_score + marginal_score;
+                predecessor_cache[j % window_size] = i;
+            }
+        }
+
+        score_cache[i % window_size] = 0;
+        predecessor_cache[i % window_size] = 0;
+    }
+    return;    
+}
+
 ///
 /// \brief Chains one tile of anchors within a read-tile
 /// TODO VI: I don't know if this is true
@@ -603,6 +655,7 @@ __global__ void chain_anchors_in_block(const Anchor* anchors,
 
                 __syncthreads();
                 // Calculate score order matters here
+                //int32_t marginal_score = log_linear_anchor_weight(block_anchor_cache[thread_id_in_block], possible_successor_anchor, word_size, max_distance, max_bandwidth);
                 int32_t marginal_score = log_linear_anchor_weight(possible_successor_anchor, block_anchor_cache[thread_id_in_block], word_size, max_distance, max_bandwidth);
 
                 __syncthreads();
@@ -639,14 +692,14 @@ __global__ void chain_anchors_in_block(const Anchor* anchors,
                 }
             }
             __syncthreads();
-            // TODO not sure if this is correct
+            // whatever is left in our cache is the values from the first 64 anchors in the subsequent block
             if (global_write_index + counter + thread_id_in_block < num_anchors)
             {
-                scores[global_write_index + counter + thread_id_in_block]             = current_score;
-                predecessors[global_write_index + counter + thread_id_in_block]       = current_pred;
-                anchor_select_mask[global_write_index + counter + thread_id_in_block] = current_mask;
+                  // These are maybe correct. The 0th index _might_ have the values corresponding to the rightmost anchor
+                  scores[global_write_index + counter + thread_id_in_block] =  block_score_cache[thread_id_in_block];
+                  predecessors[global_write_index + counter + thread_id_in_block] = block_predecessor_cache[thread_id_in_block];
+                  anchor_select_mask[global_write_index + counter + thread_id_in_block] = block_max_select_mask[thread_id_in_block];
             }
-            // printf("%d %d %d %d | %f | %d", );
         }
     }
 }
@@ -831,15 +884,134 @@ void drop_overlaps_by_mask(device_buffer<Overlap>& d_overlaps,
     chainerutils::initialize_mask<<<BLOCK_COUNT, BLOCK_SIZE, 0, _cuda_stream>>>(d_mask.data(), n_filtered, true);
 }
 
+// TODO VI: move this somewhere else
+bool self_mapping(const Overlap& overlap,
+                  const io::FastaParser& query_parser,
+                  const io::FastaParser& target_parser,
+                  const double max_percent_overlap)
+{
+    claraparabricks::genomeworks::io::FastaSequence query  = query_parser.get_sequence_by_id(overlap.query_read_id_);
+    claraparabricks::genomeworks::io::FastaSequence target = target_parser.get_sequence_by_id(overlap.target_read_id_);
+    if (query.name != target.name)
+        return false;
+    size_t read_len        = query.seq.size();
+    int32_t overlap_length = abs(static_cast<int32_t>(overlap.query_end_position_in_read_) - static_cast<int32_t>(overlap.query_start_position_in_read_));
+    double percent_overlap      = static_cast<double>(overlap_length) / static_cast<double>(read_len);
+    return percent_overlap >= max_percent_overlap;
+}
+
+void mask_overlaps_cpu(std::vector<Overlap>& overlaps,
+                       const size_t n_overlaps,
+                       std::vector<bool>& select_mask,
+                       const std::size_t min_overlap_length,
+                       const std::size_t min_residues,
+                       const std::size_t min_bases_per_residue,
+                       const bool all_to_all,
+                       const bool filter_self_mappings,
+                       const double max_percent_reciprocal,
+                       const int32_t max_reciprocal_iterations//)
+                       ,const io::FastaParser& query_parser,
+                       const io::FastaParser& target_parser)
+{
+    (void)all_to_all; // unused for now
+    for (uint32_t index = 0; index < overlaps.size(); index++)
+    {
+        // first do self-to-self filtering, skip rest of computation since we can already get rid of this overlap
+        if (self_mapping(overlaps[index], query_parser, target_parser, 0.95))
+        {
+            select_mask[index] = false;
+            continue;
+        }
+        position_in_read_t overlap_query_length  = overlaps[index].query_end_position_in_read_ - overlaps[index].query_start_position_in_read_;
+        position_in_read_t overlap_target_length = overlaps[index].target_end_position_in_read_ - overlaps[index].target_start_position_in_read_;
+
+        auto query_bases_per_residue  = static_cast<double>(overlap_query_length) / static_cast<double>(overlaps[index].num_residues_);
+        auto target_bases_per_residue = static_cast<double>(overlap_target_length) / static_cast<double>(overlaps[index].num_residues_);
+        select_mask[index]            = select_mask[index] && (overlap_query_length >= min_overlap_length) && (overlap_target_length >= min_overlap_length);
+        select_mask[index]            = select_mask[index] && (overlaps[index].num_residues_ >= min_residues);
+
+        select_mask[index] = select_mask[index] && (query_bases_per_residue < min_bases_per_residue) && (target_bases_per_residue < min_bases_per_residue);
+        // Look at the overlaps and all the overlaps adjacent to me, up to some maximum. Between neighbor i and myself, if
+        // some criteria is met, defined by percent_reciprocal_overlap() and contained_overlap(), I get filtered
+        // TODO VI: since we do these pair-wise, I think there is some overlap in work that adjacent threads do
+        for (uint32_t i = index + 1; i < /*overlaps.size()*/index + max_reciprocal_iterations; i++)
+        {
+            if (i < overlaps.size())
+            {
+                const Overlap right_neighbor = overlaps[i];
+                //select_mask[index] = select_mask[index] && (percent_reciprocal_overlap(overlaps[index], right_neighbor) <= max_percent_reciprocal);
+                if (percent_reciprocal_overlap(overlaps[index], right_neighbor) > static_cast<double>(max_percent_reciprocal)) //|| contained_overlap(overlaps[index], right_neighbor))
+                {
+                    select_mask[index] = false;
+                }
+            }
+        }
+    }
+}
+
+void drop_overlaps_by_mask_cpu(std::vector<Overlap>& overlaps_source,
+                               std::vector<bool>& select_mask,
+                               std::vector<Overlap>& overlaps_dest)
+{
+    for (uint32_t i = 0; i < overlaps_source.size(); i++)
+    {
+        if (select_mask[i])
+        {
+            overlaps_dest.push_back(overlaps_source[i]);
+        }
+    }
+}
+
 void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
                                      const device_buffer<Anchor>& d_anchors,
                                      bool all_to_all,
+                      const io::FastaParser& query_parser,
+                      const io::FastaParser& target_parser,
                                      int64_t min_residues,
                                      int64_t min_overlap_len,
                                      int64_t min_bases_per_residue,
                                      float min_overlap_fraction)
 {
-    const int32_t n_anchors = d_anchors.size();
+#ifdef RUN_CPU
+    const size_t n_anchors = d_anchors.size();
+    std::vector<int32_t> predecessors(n_anchors, 0);
+    std::vector<double> scores(n_anchors, 0);
+    std::vector<Anchor> anchors(n_anchors);
+    std::vector<bool> select_mask(n_anchors, true);
+    std::vector<Overlap> overlaps_source(n_anchors);
+    cudautils::device_copy_n(d_anchors.data(), n_anchors, anchors.data(), _cuda_stream);
+    GW_CU_CHECK_ERR(cudaStreamSynchronize(_cuda_stream));
+
+    chain_anchors_in_block_cpu(anchors,
+                                scores,
+                                predecessors,
+                                n_anchors);
+
+    chainerutils::backtrace_anchors_to_overlaps_cpu(anchors,
+                                       overlaps_source,
+                                       scores,
+                                       select_mask,
+                                       predecessors,
+                                       n_anchors,
+                                       30); // min_score
+
+    mask_overlaps_cpu(overlaps_source,
+                        n_anchors,
+                        select_mask,
+                        min_overlap_len,
+                        min_residues,
+                        min_bases_per_residue,
+                        all_to_all,
+                        false,
+                        0.9,
+                        2048,
+                        query_parser,
+                        target_parser);
+
+    drop_overlaps_by_mask_cpu(overlaps_source, select_mask, fused_overlaps);
+#else
+    const std::int32_t block_size = 32;
+    const std::size_t n_anchors   = d_anchors.size();
 
     device_buffer<bool> d_overlaps_select_mask(n_anchors, _allocator, _cuda_stream);
     device_buffer<Overlap> d_overlaps_source(n_anchors, _allocator, _cuda_stream);
@@ -921,7 +1093,6 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
                                                                                               n_anchors,
                                                                                               40);
 
-    // TODO VI: I think we can get better device occupancy here with some kernel refactoring
     mask_overlaps<<<BLOCK_COUNT, BLOCK_SIZE, 0, _cuda_stream>>>(d_overlaps_source.data(),
                                                                 d_overlaps_select_mask.data(),
                                                                 min_overlap_len,
@@ -949,6 +1120,7 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
     // This is not completely necessary, but if removed one has to make sure that the next step
     // uses the same stream or that sync is done in caller
     GW_CU_CHECK_ERR(cudaStreamSynchronize(_cuda_stream));
+#endif
 }
 
 OverlapperMinimap::OverlapperMinimap(DefaultDeviceAllocator allocator,

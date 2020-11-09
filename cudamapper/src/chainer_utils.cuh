@@ -115,11 +115,11 @@ __global__ void backtrace_anchors_to_overlaps_debug(const Anchor* anchors,
                                                     const int32_t n_anchors,
                                                     const int32_t min_score);
 
-void backtrace_anchors_to_overlaps_cpu(const Anchor* anchors,
-                                       Overlap* overlaps,
-                                       double* scores,
-                                       bool* max_select_mask,
-                                       int32_t* predecessors,
+void backtrace_anchors_to_overlaps_cpu(std::vector<Anchor>& anchors,
+                                       std::vector<Overlap>& overlaps,
+                                       std::vector<double>& scores,
+                                       std::vector<bool>&  max_select_mask,
+                                       std::vector<int32_t>& predecessors,
                                        const int32_t n_anchors,
                                        const int32_t min_score);
 

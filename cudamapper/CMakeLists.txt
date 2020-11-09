@@ -59,8 +59,8 @@ cuda_add_library(${MODULE_NAME}
         src/matcher_gpu.cu
         src/cudamapper_utils.cpp
         src/overlapper.cpp
-        src/overlapper_triggered.cu
-        src/overlapper_anchmer.cu
+        #src/overlapper_triggered.cu
+        #src/overlapper_anchmer.cu
         src/overlapper_minimap.cu
         src/utils.cpp
         ${CMAKE_CURRENT_BINARY_DIR}/version.cpp)
@@ -86,7 +86,7 @@ set_target_properties(${MODULE_NAME}-bin PROPERTIES OUTPUT_NAME ${MODULE_NAME})
 
 # Add tests folder
 add_subdirectory(tests)
-add_subdirectory(samples)
+#add_subdirectory(samples)
 
 install(TARGETS ${MODULE_NAME}
     EXPORT ${MODULE_NAME}

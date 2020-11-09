@@ -56,6 +56,8 @@ public:
     void get_overlaps(std::vector<Overlap>& fused_overlaps,
                       const device_buffer<Anchor>& d_anchors,
                       bool all_to_all,
+                      const io::FastaParser& query_parser,
+                      const io::FastaParser& target_parser,
                       int64_t min_residues          = 20,
                       int64_t min_overlap_len       = 50,
                       int64_t min_bases_per_residue = 50,
