@@ -913,7 +913,7 @@ void OverlapperMinimap::get_overlaps(std::vector<Overlap>& fused_overlaps,
 #endif
 
     // the deschedule block. Get outputs from here
-    chainerutils::backtrace_anchors_to_overlaps<<<BLOCK_COUNT, BLOCK_SIZE, 0, _cuda_stream>>>(d_anchors.data(),
+    chainerutils::backtrace_anchors_to_overlaps_old<<<BLOCK_COUNT, BLOCK_SIZE, 0, _cuda_stream>>>(d_anchors.data(),
                                                                                               d_overlaps_source.data(),
                                                                                               d_anchor_scores.data(),
                                                                                               d_overlaps_select_mask.data(),

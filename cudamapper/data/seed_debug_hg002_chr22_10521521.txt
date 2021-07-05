@@ -1,0 +1,1 @@
+[ERROR] failed to open file 'test_hg002_chr22_10521521.fq': No such file or directory
